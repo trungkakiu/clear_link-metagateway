@@ -1,0 +1,23 @@
+{
+  "id": "node1",
+  "type": "meta_database",
+  "port": 5099,
+  "db": {
+    "name": "supply_chain_metadatabase",
+    "user": "root",
+    "pass": "123456",
+    "host": "localhost",
+    "port": 3399
+  },
+  "peers": [
+    "http://0.0.0.0:5001",
+    "http://0.0.0.0:5002",
+    "http://0.0.0.0:5003",
+    "http://0.0.0.0:5004",
+    "http://0.0.0.0:5005",
+    "http://0.0.0.0:5006",
+    "http://0.0.0.0:5007",
+    "http://0.0.0.0:5008",
+    "http://0.0.0.0:5009"
+  ]
+}
