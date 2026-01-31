@@ -60,7 +60,6 @@ const verifyToken = (db) => async (req, res, next) => {
         token,
         process.env.JWT_SECRET || "supersecretkey12doto3",
       );
-      console.log("decoded: ", decoded);
       req.user = decoded;
       next();
     } catch (err) {

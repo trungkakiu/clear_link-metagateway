@@ -5,6 +5,7 @@ import meta_ws_controller, {
 import db from "./src/models/metadatabase/index.js";
 import crypto from "crypto";
 import { v4 as uuidv4 } from "uuid";
+import { pendingRequests } from "./meta_server.js";
 import { syncingNodes } from "./meta_server.js";
 
 function normalizePemKey(key) {
@@ -166,8 +167,7 @@ async function handleNodeConnected(ws, globalState) {
 }
 
 export const handleWsMessage =
-  (nodes, pendingRequests, wsBySessionId) =>
-  async (ws, raw, handshakeTimeout) => {
+  (nodes, wsBySessionId) => async (ws, raw, handshakeTimeout) => {
     try {
       const msg = JSON.parse(raw.toString());
       if (msg.type === "client_log") {
@@ -226,25 +226,28 @@ export const handleWsMessage =
         };
 
         ws._state = "AUTHENTICATED";
-        clearTimeout(handshakeTimeout);
+
         if (nodes.has(node.id)) {
           nodes.get(node.id).close(4009, "DUPLICATE_NODE");
         }
-        nodes.set(node.id, ws);
+        await nodes.set(node.id, ws);
 
         await handleNodeConnected(ws, canonicate_node);
+        clearTimeout(handshakeTimeout);
         return;
       }
 
       if (!ws._session || !ws._session.sessionId) {
         ws.close(4001, "Session expired");
+        clearTimeout(handshakeTimeout);
         return;
       }
 
-      const { sessionId } = ws._session;
+      const sessionId = ws._session.sessionId;
       if (msg.sessionId !== sessionId) {
         console.log("Invalid sessionId in message:", msg);
         ws.close(4004, "Invalid session");
+        clearTimeout(handshakeTimeout);
         return;
       }
       const nodeId = ws._session.nodeId;
@@ -259,11 +262,6 @@ export const handleWsMessage =
           console.log(
             `[WS - VOTE - DROP - RES] - [${msg.nodeId}]: ${JSON.stringify(msg, null, 2)}`,
           );
-          console.log("DEBUG vote_response arrived:", {
-            voteRoundId: msg.voteRoundId,
-            nodeId: msg.nodeId,
-            hasRound: voteRounds.has(msg.voteRoundId),
-          });
 
           const round = voteRounds.get(msg.voteRoundId);
 
@@ -277,11 +275,6 @@ export const handleWsMessage =
             ? round.shouldFinalize(round.votes)
             : "NO_FUNC";
 
-          console.log("DEBUG shouldFinalize check:", {
-            votesSize: round.votes.size,
-            nodesSize: nodes.size,
-            result: finalizeResult,
-          });
           if (finalizeResult === true) {
             clearTimeout(round.timeoutId);
             round.status = "FINALIZED";
@@ -365,6 +358,36 @@ export const handleWsMessage =
 
           break;
 
+        case "drop_response": {
+          console.log(
+            `[WS - DROP - RES] - [${msg.nodeId}]: ${JSON.stringify(msg, null, 2)}`,
+          );
+
+          const round = voteRounds.get(msg.voteRoundId);
+
+          if (!round || round.status !== "OPEN") return;
+
+          if (round.votes.has(msg.nodeId)) return;
+
+          round.votes.set(msg.nodeId, msg);
+
+          const finalizeResult = round.shouldFinalize
+            ? round.shouldFinalize(round.votes)
+            : "NO_FUNC";
+
+          if (finalizeResult === true) {
+            clearTimeout(round.timeoutId);
+            round.status = "FINALIZED";
+            voteRounds.delete(msg.voteRoundId);
+
+            round.resolve({
+              timeout: false,
+              votes: Array.from(round.votes.values()),
+            });
+          }
+
+          break;
+        }
         case "command_response": {
           console.log(
             `[WS - CMD - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(msg, null, 2)}`,
@@ -380,12 +403,9 @@ export const handleWsMessage =
           break;
         }
         case "vote_response": {
-          console.log(`[WS - VOTE - RESPONSE] - [${msg.nodeId}]: ${msg}`);
-          console.log("DEBUG vote_response arrived:", {
-            voteRoundId: msg.voteRoundId,
-            nodeId: msg.nodeId,
-            hasRound: voteRounds.has(msg.voteRoundId),
-          });
+          console.log(
+            `[WS - VOTE - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(msg, null, 2)}`,
+          );
 
           const round = voteRounds.get(msg.voteRoundId);
 
@@ -470,17 +490,32 @@ export const handleWsMessage =
         }
         case "pair_product_response": {
           console.log(
-            `[WS - PRODUCTPAIR - RESPONSE] - [${msg.nodeId}]: ${msg}`,
+            `[WS - PRODUCTPAIR - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(
+              msg,
+              null,
+              2,
+            )}`,
           );
-          const entry = pendingRequests.get(msg.requestId);
+
+          const entry = await pendingRequests.get(msg.requestId);
+
           if (!entry) {
             console.warn("WS: No resolver found for requestId:", msg.requestId);
             break;
           }
 
-          clearTimeout(entry.timer);
+          if (entry.timer) clearTimeout(entry.timer);
           pendingRequests.delete(msg.requestId);
-          entry.resolve(msg);
+
+          if (typeof entry.resolve === "function") {
+            entry.resolve(msg);
+          } else {
+            console.error(
+              "WS: pendingRequests entry has no resolve()",
+              msg.requestId,
+              entry,
+            );
+          }
           break;
         }
         case "override_block_respone": {
@@ -488,6 +523,7 @@ export const handleWsMessage =
             `[WS - REPAIRBLOCk - RESPONSE] - [${msg.nodeId}]: ${msg}`,
           );
           const resolver = pendingRequests.get(msg.requestId);
+
           if (resolver) {
             pendingRequests.delete(msg.requestId);
             resolver(msg);
@@ -497,6 +533,11 @@ export const handleWsMessage =
           break;
         }
         case "get_block_response": {
+          console.log(
+            `[WS - GETSYNCBLOCK - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(msg, null, 2)}`,
+          );
+          console.log("[RPC RESOLVE] MAP ID:", pendingRequests);
+
           const entry = pendingRequests.get(msg.requestId);
 
           if (!entry) {
@@ -701,7 +742,6 @@ export const handleWsMessage =
                 status: node_allow.health,
                 blocks: block.RD.blocks ?? [],
                 code: 200,
-
                 sync_status: block.RD.sync_status,
                 ok: true,
                 message: "block response",
@@ -717,13 +757,31 @@ export const handleWsMessage =
         }
 
         case "Maintenance_responese": {
+          console.log(
+            `[WS - MAINTENANCE - RES] - [${nodeId}]: ${JSON.stringify(
+              msg,
+              null,
+              2,
+            )}`,
+          );
           const entry = pendingRequests.get(msg.requestId);
-          if (entry) {
-            clearTimeout(entry.timer);
-            pendingRequests.delete(msg.requestId);
-            entry(msg);
-          } else {
+
+          if (!entry) {
             console.warn("WS: No resolver found for requestId:", msg.requestId);
+            break;
+          }
+
+          if (entry.timer) clearTimeout(entry.timer);
+          pendingRequests.delete(msg.requestId);
+
+          if (typeof entry.resolve === "function") {
+            entry.resolve(msg);
+          } else {
+            console.error(
+              "WS: pendingRequests entry has no resolve()",
+              msg.requestId,
+              entry,
+            );
           }
           break;
         }

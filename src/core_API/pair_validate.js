@@ -46,21 +46,19 @@ function verifyVote(publicKey, payload, signature) {
   }
 }
 
-const process_user_block = (db, nodes) => async (user_id) => {
-  const TRACE = `[PROCESS_USER_BLOCK][${user_id}]`;
+const process_user_block = (db, nodes) => async (user) => {
+  const TRACE = `[PROCESS_USER_BLOCK][${user.id}]`;
   try {
-    const user = await db.Actor_model.findOne({
-      where: {
-        id: user_id,
-        status: "pending",
-      },
-    });
+    if (!user) {
+      return { ok: false, msg: "User not found" };
+    }
 
     const version = await db.System_Settings.findOne({
       where: { key: "APPVS" },
     });
 
-    if (user.status !== "pending") {
+    console.log("USER STATUS: ", user.status);
+    if (user.status !== "pairing" || user.status == "active") {
       console.warn(`${TRACE} SKIP: user already processed`);
       return { ok: false, msg: "User already processed" };
     }
@@ -72,7 +70,7 @@ const process_user_block = (db, nodes) => async (user_id) => {
         msg: "User không hợp lệ hoặc không ở trạng thái pending.",
       };
     }
-
+    await user.update({ status: "pairing" });
     const raw = `${user.id}|${user.email}|${user.public_key}|${user.role}`;
     const user_hash = crypto.createHash("sha256").update(raw).digest("hex");
 
@@ -224,11 +222,13 @@ const get_vote = async (
 
       if (nodeData.node_type === "admin") admin_online++;
       else client_online++;
-
+      const sessionId = ws._session.sessionId;
+      console.log("sessionId: ", sessionId);
       ws.send(
         JSON.stringify({
           type: "command",
           command: "get_vote",
+          sessionId: sessionId,
           requestId: uuidv4(),
           voteRoundId,
           payload: {
@@ -359,16 +359,13 @@ const pair_request = async (db, payload, nodes, type) => {
         }
 
         const requestId = uuidv4();
-        const waitResponse = Helper__funtion.waitRpc(
-          pendingRequests,
-          requestId,
-          3000,
-        );
+        const waitResponse = Helper__funtion.waitRpc(requestId, 3000);
 
-        ws.send(
+        await ws.send(
           JSON.stringify({
             type: "command",
             command: type,
+            sessionId: ws._session.sessionId,
             requestId,
             payload,
             serverTime: Date.now(),
@@ -376,7 +373,9 @@ const pair_request = async (db, payload, nodes, type) => {
         );
 
         const result = await waitResponse;
+        console.log("result in pair request: ", result);
         if (result.timeout) {
+          console.log("TIMEOUT PAIR REQUEST");
           peer_map_list[nodeId] = false;
           failed++;
           return;
@@ -503,14 +502,15 @@ function canonicalStringify(obj) {
   return JSON.stringify(obj, Object.keys(obj).sort());
 }
 
-const get_drop_vote = async (db, nodes, drop_list) => {
+const get_drop_vote = async (
+  db,
+  nodes,
+  drop_list,
+  onlineEntries,
+  expectedVotes,
+) => {
   const TAG = "[DROP_VOTE]";
   const voteRoundId = crypto.randomUUID();
-
-  console.log(TAG, "START", {
-    voteRoundId,
-    dropCount: drop_list.length,
-  });
 
   try {
     const productVoteMap = {};
@@ -524,32 +524,13 @@ const get_drop_vote = async (db, nodes, drop_list) => {
       };
     }
 
-    console.log(TAG, "INIT productVoteMap", Object.keys(productVoteMap));
-
     let admin_online = 0;
     let client_online = 0;
-
-    const onlineEntries = [];
-    for (const [nodeId, ws] of nodes) {
-      if (ws && ws.readyState === ws.OPEN) {
-        onlineEntries.push([nodeId, ws]);
-      }
-    }
-
-    console.log(TAG, "ONLINE NODES", {
-      online: onlineEntries.length,
-      total: nodes.size,
+    const total_admin = await db.peer_map.count({
+      where: {
+        node_type: "admin",
+      },
     });
-
-    const expectedVotes = onlineEntries.length;
-    if (expectedVotes === 0) {
-      console.warn(TAG, "NO ONLINE NODES → ABORT");
-      return {
-        RC: 503,
-        RM: "No online nodes to vote",
-        RD: null,
-      };
-    }
 
     const waitVoteRound = new Promise((resolve) => {
       const timeoutId = setTimeout(() => {
@@ -593,16 +574,11 @@ const get_drop_vote = async (db, nodes, drop_list) => {
       if (nodeData.node_type === "admin") admin_online++;
       else client_online++;
 
-      console.log(TAG, "SEND VOTE REQUEST", {
-        voteRoundId,
-        nodeId,
-        node_type: nodeData.node_type,
-      });
-
       ws.send(
         JSON.stringify({
           type: "command",
           command: "drop_precheck_vote",
+          sessionId: ws._session.sessionId,
           requestId: uuidv4(),
           voteRoundId,
           payload: {
@@ -614,57 +590,19 @@ const get_drop_vote = async (db, nodes, drop_list) => {
         }),
       );
     }
-
-    console.log(TAG, "VOTE REQUEST SENT", {
-      admin_online,
-      client_online,
-      expectedVotes,
-    });
-
-    // ============================
-    // 5. WAIT FOR VOTES
-    // ============================
     const result = await waitVoteRound;
-    console.log("result: ", JSON.stringify(result, null, 2));
 
-    console.log(TAG, "VOTE ROUND FINISHED", {
-      voteRoundId,
-      timeout: result.timeout,
-      receivedVotes: result.votes.length,
-    });
-
-    // ============================
-    // 6. PROCESS VOTES
-    // ============================
     for (const vote of result.votes) {
-      console.log(TAG, "PROCESS VOTE", {
-        voteRoundId,
-        fromNode: vote.nodeId,
-      });
-
       const nodeData = await db.peer_map.findByPk(vote.nodeId);
       if (!nodeData) {
         console.warn(TAG, "VOTE NODE NOT FOUND", vote.nodeId);
         continue;
       }
 
-      const signBody = {
-        type: "drop_precheck_vote_ack",
-        voteRoundId: vote.voteRoundId,
-        nodeId: vote.nodeId,
-        votePayload: vote.votePayload,
-      };
-
-      const raw = canonicalStringify(signBody);
-
-      const verifier = crypto.createVerify("RSA-SHA256");
-      verifier.update(raw);
-      verifier.end();
-
-      const isValid = verifier.verify(
-        nodeData.public_key,
+      const isValid = Helper__funtion.verifyVotePayload(
+        vote.votePayload.votes,
         vote.signature,
-        "base64",
+        nodeData.public_key,
       );
 
       if (!isValid) {
@@ -674,8 +612,7 @@ const get_drop_vote = async (db, nodes, drop_list) => {
         });
         continue;
       }
-
-      for (const v of vote.payload.votes) {
+      for (const v of vote.votePayload.votes) {
         const { product_id, approve } = v;
         const record = productVoteMap[product_id];
 
@@ -691,29 +628,18 @@ const get_drop_vote = async (db, nodes, drop_list) => {
         } else {
           approve ? record.client_true++ : record.client_false++;
         }
-
-        console.log(TAG, "VOTE COUNTED", {
-          voteRoundId,
-          nodeId: vote.nodeId,
-          product_id,
-          approve,
-          node_type: nodeData.node_type,
-        });
       }
     }
 
-    // ============================
-    // 7. QUORUM PER PRODUCT
-    // ============================
     const product_results = {};
-
     for (const [productId, v] of Object.entries(productVoteMap)) {
       const admin_pass =
-        admin_online > 0 && v.admin_true >= Math.ceil((admin_online * 5) / 6);
+        admin_online > (total_admin / 5) * 4 &&
+        v.admin_true >= Math.ceil((admin_online * 5) / 6);
 
-      const client_block = client_online > 0 && v.client_false > v.client_true;
+      const client_block = client_online > 0 && v.client_false < v.client_true;
 
-      const quorum_pass = admin_pass && !client_block;
+      const quorum_pass = admin_pass && client_block;
 
       product_results[productId] = {
         approve: quorum_pass,
@@ -729,34 +655,14 @@ const get_drop_vote = async (db, nodes, drop_list) => {
         },
         voters: v.voters,
       };
-
-      console.log(TAG, "QUORUM RESULT", {
-        voteRoundId,
-        productId,
-        quorum_pass,
-        admin_true: v.admin_true,
-        admin_false: v.admin_false,
-        client_true: v.client_true,
-        client_false: v.client_false,
-      });
     }
-
-    // ============================
-    // 8. FINAL LOG
-    // ============================
-    console.log(TAG, "END", {
-      voteRoundId,
-      admin_online,
-      client_online,
-      total_online: admin_online + client_online,
-    });
 
     return {
       RC: 200,
       RM: "Drop vote finished",
       RD: {
         voteRoundId,
-        products: JSON.stringify(product_results),
+        products: product_results,
         summary: {
           admin_online,
           client_online,

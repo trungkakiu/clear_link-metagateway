@@ -149,12 +149,12 @@ const auto_pair_product = async (db, nodes) => {
           Math.ceil((vote_results.RD.admin.online * 5) / 6)
       ) {
         await product.update({ chain_status: "active" });
-        console.log("vote_success: ", item_result);
+        console.log("vote_success: ", JSON.stringify(item_result, null, 2));
         item_result.status = "success";
       } else {
         await product.update({ chain_status: "pending" });
-        console.log("vote_failed: ", item_result);
-        item_result.status = "commit_failed";
+        console.log("vote_failed: ", JSON.stringify(item_result, null, 2));
+        item_result.status = " ";
       }
       result_map.push(item_result);
     }
@@ -345,15 +345,13 @@ const get_global_node = async (db, nodes) => {
         peer_map_list[nodeId] = false;
 
         const requestId = uuidv4();
-        const waitResponse = Helper__funtion.waitRpc(
-          pendingRequests,
-          requestId,
-          3000,
-        );
+
+        const waitResponse = Helper__funtion.waitRpc(requestId, 3000);
         if (!ws._session?.sessionId) {
           failed++;
           return;
         }
+
         ws.send(
           JSON.stringify({
             type: "command",
@@ -501,7 +499,7 @@ const auto_pair_user = async (db, nodes) => {
         msg: "Auto approve user is disabled.",
       };
     }
-
+    console.log("PAIR USER");
     const user_list = await db.Actor_model.findAll({
       where: {
         role_active: "active",
@@ -519,7 +517,7 @@ const auto_pair_user = async (db, nodes) => {
         msg: "Không có người dùng pending.",
       };
     }
-
+    console.log("USER LIST LENGTH: ", user_list.length);
     const result_map = {};
 
     for (const user of user_list) {
@@ -529,7 +527,7 @@ const auto_pair_user = async (db, nodes) => {
         db,
         nodes,
         pendingRequests,
-      )(user.id);
+      )(user);
 
       if (result.ok) {
         await user.update({ status: "active" });
@@ -552,7 +550,7 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
   const syncId = `SYNC_${Date.now()}`;
   try {
     console.log(
-      `[${syncId}] START sync from_height=${from_height}, limit=${limit}`,
+      `[${syncId}] START sync from_height= ${from_height}, limit= ${limit}`,
     );
 
     const peer_map_list = {};
@@ -598,7 +596,6 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
     }
 
     const quorum = Math.floor(adminNodes.length / 2) + 1;
-    console.log(`[${syncId}] QUORUM=${quorum}`);
 
     const tasks = [];
     const adminResponses = [];
@@ -608,11 +605,9 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
         peer_map_list[nodeId] = false;
 
         const requestId = uuidv4();
-        const waitResponse = Helper__funtion.waitRpc(
-          pendingRequests,
-          requestId,
-          3000,
-        );
+
+        console.log("Helper__funtion.waitRpc =", Helper__funtion.waitRpc);
+        const waitResponse = Helper__funtion.waitRpc(requestId, 3000);
 
         ws.send(
           JSON.stringify({
@@ -627,7 +622,6 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
         );
 
         const result = await waitResponse;
-
         console.log(`[${syncId}] RESPONSE from ${nodeId}:`, result);
 
         if (result?.timeout) {
@@ -647,10 +641,6 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
             validator: result.validator || nodeId,
             blocks: result.blocks,
           });
-
-          console.log(
-            `ADMIN RESPONSE ${JSON.stringify(adminResponses, null, 2)}`,
-          );
         } else {
           console.warn(`[${syncId}] INVALID RESPONSE from ${nodeId}`);
           failed++;
@@ -691,15 +681,15 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
         continue;
       }
 
-      let prevH = startHeight;
+      let expectedH = startHeight;
       let okSeq = true;
 
       for (const b of admin.blocks) {
-        if (b.Height !== prevH) {
+        if (b.Height !== expectedH) {
           okSeq = false;
           break;
         }
-        prevH = b.Height;
+        expectedH++;
       }
 
       if (!okSeq) {
@@ -727,17 +717,13 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
 
     console.log(`[${syncId}] HEIGHTS COLLECTED:`, Object.keys(blockByHeight));
 
-    /* =========================
-       4. Consensus per height
-    ========================= */
-
     const heights = Object.keys(blockByHeight)
       .map(Number)
       .sort((a, b) => a - b);
 
     const canonicalBlocks = [];
     let expectedHeight = startHeight;
-    let previousHash = null;
+    let previousHash = "GENESIS";
     console.log("start_height: ", startHeight);
     for (const height of heights) {
       if (height !== expectedHeight) break;
@@ -747,7 +733,10 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
 
       for (const c of candidates) {
         if (c.count < quorum) continue;
-        if (expectedHeight !== startHeight && c.block.previous !== previousHash)
+        if (
+          expectedHeight !== startHeight &&
+          c.block.PreviousHash !== previousHash
+        )
           continue;
 
         if (!winner || c.count > winner.count) winner = c;
@@ -756,7 +745,7 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
       if (!winner) break;
 
       console.log(
-        `[${syncId}] SELECT height=${height} hash=${winner.block.block_hash} votes=${winner.count}`,
+        `[${syncId}] SELECT height=${height} hash=${winner.block.Hash} votes=${winner.count}`,
       );
 
       canonicalBlocks.push({
@@ -765,7 +754,7 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
         votes: winner.count,
       });
 
-      previousHash = winner.block.block_hash;
+      previousHash = winner.block.Hash;
       expectedHeight++;
       if (expectedHeight > endHeight) break;
     }
@@ -887,11 +876,6 @@ const MaintenanceNode = (db, nodes) => async (req, res) => {
   const requestId = uuidv4();
   const startTime = Date.now();
 
-  console.log(`[MAINTENANCE][${requestId}] Incoming request`, {
-    body: req.body,
-    time: new Date().toISOString(),
-  });
-
   try {
     const { NodeID } = req.body;
 
@@ -956,23 +940,7 @@ const MaintenanceNode = (db, nodes) => async (req, res) => {
       });
     }
 
-    const waitResponse = new Promise((resolve) => {
-      pendingRequests.set(requestId, resolve);
-
-      console.log(`[MAINTENANCE][${requestId}] Pending request registered`, {
-        pendingCount: pendingRequests.size,
-      });
-
-      setTimeout(() => {
-        if (pendingRequests.has(requestId)) {
-          pendingRequests.delete(requestId);
-          console.warn(
-            `[MAINTENANCE][${requestId}] Timeout waiting node response`,
-          );
-          resolve({ timeout: true });
-        }
-      }, 10000);
-    });
+    const waitResponse = Helper__funtion.waitRpc(requestId, 3000);
 
     console.log(
       `[MAINTENANCE][${requestId}] Sending maintenance command to node`,
@@ -1049,23 +1017,39 @@ const Drop_block = async (db, nodes) => {
       limit: 5,
       attributes: ["id"],
     });
+
     if (drop_list.length < 1) {
-      console.log(TAG, "NO PRODUCT TO DROP → EXIT");
+      console.log("NO PRODUCT TO DROP → EXIT");
       return;
     }
 
-    for (const element of drop_list) {
-      await element.update({ chain_status: "pairing" });
+    const onlineEntries = [];
+    for (const [nodeId, ws] of nodes) {
+      if (ws && ws.readyState === ws.OPEN) {
+        onlineEntries.push([nodeId, ws]);
+      }
     }
 
-    const voteRes = await pair_validate.get_drop_vote(db, nodes, drop_list);
-
-    for (const element of drop_list) {
-      await element.update({ chain_status: "wait-droped" });
+    const expectedVotes = onlineEntries.length;
+    if (expectedVotes === 0) {
+      console.warn("NO ONLINE NODES → ABORT");
+      return {
+        RC: 503,
+        RM: "No online nodes to vote",
+        RD: null,
+      };
     }
+
+    const voteRes = await pair_validate.get_drop_vote(
+      db,
+      nodes,
+      drop_list,
+      onlineEntries,
+      expectedVotes,
+    );
 
     if (!voteRes || voteRes.RC !== 200) {
-      console.warn(TAG, "VOTE FAILED OR INVALID", voteRes?.RM);
+      console.warn("VOTE FAILED OR INVALID", voteRes?.RM);
       return;
     }
 
@@ -1077,32 +1061,84 @@ const Drop_block = async (db, nodes) => {
     const approvedIds = Object.entries(products)
       .filter(([_, v]) => v.approve === true)
       .map(([id]) => id);
+    let admin_online = 0;
+    let client_online = 0;
+    const waitVoteRound = new Promise((resolve) => {
+      const timeoutId = setTimeout(() => {
+        const round = voteRounds.get(voteRoundId);
+        if (!round) return;
 
-    return {
-      RC: 500,
-      approvedIds,
-    };
+        console.warn("VOTE ROUND TIMEOUT", {
+          voteRoundId,
+        });
 
-    // ============================
-    // 6. COMMIT (khi bật lại)
-    // ============================
-    // if (approvedIds.length > 0) {
-    //   console.log(TAG, "BROADCAST drop_commit", approvedIds);
-    //
-    //   await wsGateway.broadcast({
-    //     type: "drop_commit",
-    //     products: approvedIds,
-    //   });
-    //
-    //   await db.Product.update(
-    //     { chain_status: "drop" },
-    //     { where: { id: approvedIds } },
-    //   );
-    // }
+        round.status = "TIMEOUT";
+        voteRounds.delete(voteRoundId);
+
+        resolve({
+          timeout: true,
+          votes: Array.from(round.votes.values()),
+        });
+      }, 10_000);
+
+      voteRounds.set(voteRoundId, {
+        status: "OPEN",
+        votes: new Map(),
+        expectedVotes,
+        timeoutId,
+        resolve,
+        shouldFinalize() {
+          return this.votes.size >= this.expectedVotes;
+        },
+      });
+    });
+
+    if (approvedIds.length > 0) {
+      for (const [nodeId, ws] of onlineEntries) {
+        const nodeData = await db.peer_map.findByPk(nodeId);
+        if (!nodeData) {
+          console.warn(TAG, "NODE DATA NOT FOUND", nodeId);
+          continue;
+        }
+
+        if (nodeData.node_type === "admin") admin_online++;
+        else client_online++;
+
+        ws.send(
+          JSON.stringify({
+            type: "command",
+            command: "drop_product",
+            sessionId: ws._session.sessionId,
+            requestId: uuidv4(),
+            voteRoundId,
+            payload: {
+              approvedIds,
+            },
+            serverTime: Date.now(),
+          }),
+        );
+      }
+      await db.Product.update(
+        { chain_status: "down" },
+        { where: { id: approvedIds } },
+      );
+      const result = await waitVoteRound;
+      console.log("drop_res: ", result);
+    }
   } catch (error) {
     console.error("FATAL ERROR", error);
     return;
   }
+};
+
+const signature_rawdata = async (canonicalVotes) => {
+  const data = JSON.stringify(canonicalVotes);
+
+  const signer = crypto.createSign("RSA-SHA256");
+  signer.update(data, "utf8");
+  signer.end();
+
+  return signer.sign(KeyStore.getPrivateKey(), "base64");
 };
 
 export default {
@@ -1110,6 +1146,7 @@ export default {
   auto_pair_product,
   Drop_block,
   getNodeBaseInfomation,
+  signature_rawdata,
   get_global_node,
   getBlockFormHeight,
   auto_pair_user,

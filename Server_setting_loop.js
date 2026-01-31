@@ -32,7 +32,7 @@ async function loop_ATOAPP(db, nodes) {
 async function loop_ATOAPU(db, nodes) {
   if (running_ATOAPU) return;
   running_ATOAPU = true;
-
+  
   try {
     const settings = await db.System_Settings.findOne({
       where: { key: "ATOAPU" },
@@ -112,7 +112,7 @@ async function loop_ATORMP(db, nodes) {
 
     setTimeout(() => {
       console.log("[ATORMP] NEXT round start");
-      running_ATORMP = false; // ✅ reset TẠI ĐÂY
+      running_ATORMP = false;
       loop_ATORMP(db, nodes);
     }, delay);
   } catch (err) {
@@ -120,7 +120,7 @@ async function loop_ATORMP(db, nodes) {
 
     setTimeout(() => {
       console.log("[ATORMP] RETRY round");
-      running_ATORMP = false; // ✅ reset TẠI ĐÂY
+      running_ATORMP = false;
       loop_ATORMP(db, nodes);
     }, 5000);
   }

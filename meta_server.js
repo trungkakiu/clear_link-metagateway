@@ -40,9 +40,9 @@ const server = http.createServer(app);
 const wssNode = new WebSocketServer({ server });
 
 let nodes = new Map();
-const wsBySessionId = new Map();
-export const pendingRequests = new Map();
-export const syncingNodes = new Map();
+let wsBySessionId = new Map();
+export let pendingRequests = new Map();
+export let syncingNodes = new Map();
 
 wssNode.on("connection", (ws, req) => {
   try {
