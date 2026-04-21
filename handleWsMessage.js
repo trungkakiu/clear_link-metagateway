@@ -187,6 +187,7 @@ export const handleWsMessage =
         clearTimeout(handshakeTimeout);
         return;
       }
+
       if (msg.type === "init" && ws._state === "AUTHENTICATED") {
         ws.send(
           JSON.stringify({
@@ -291,13 +292,13 @@ export const handleWsMessage =
 
         case "heartbeat":
           const client_status = msg.status;
-          console.log(
-            `[WS - HEARTBEAT] - [${msg.nodeId}]: ${JSON.stringify(
-              msg,
-              null,
-              2,
-            )}`,
-          );
+          // console.log(
+          //   `[WS - HEARTBEAT] - [${msg.nodeId}]: ${JSON.stringify(
+          //     msg,
+          //     null,
+          //     2,
+          //   )}`,
+          // );
           if (client_status === "fork") {
             await ws.send(
               JSON.stringify({
@@ -462,10 +463,6 @@ export const handleWsMessage =
           break;
         }
         case "server_global_node": {
-          console.log(
-            `[WS - ADMINGLOBAL - INFO] - [${msg.nodeId}]:`,
-            JSON.stringify(msg, null, 2),
-          );
           const entry = pendingRequests.get(msg.requestId);
 
           if (!entry) {
@@ -518,6 +515,36 @@ export const handleWsMessage =
           }
           break;
         }
+        case "pair_other_response": {
+          console.log(
+            `[WS - OTHERBLOCK - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(
+              msg,
+              null,
+              2,
+            )}`,
+          );
+
+          const entry = await pendingRequests.get(msg.requestId);
+
+          if (!entry) {
+            console.warn("WS: No resolver found for requestId:", msg.requestId);
+            break;
+          }
+
+          if (entry.timer) clearTimeout(entry.timer);
+          pendingRequests.delete(msg.requestId);
+
+          if (typeof entry.resolve === "function") {
+            entry.resolve(msg);
+          } else {
+            console.error(
+              "WS: pendingRequests entry has no resolve()",
+              msg.requestId,
+              entry,
+            );
+          }
+          break;
+        }
         case "override_block_respone": {
           console.log(
             `[WS - REPAIRBLOCk - RESPONSE] - [${msg.nodeId}]: ${msg}`,
@@ -533,11 +560,6 @@ export const handleWsMessage =
           break;
         }
         case "get_block_response": {
-          console.log(
-            `[WS - GETSYNCBLOCK - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(msg, null, 2)}`,
-          );
-          console.log("[RPC RESOLVE] MAP ID:", pendingRequests);
-
           const entry = pendingRequests.get(msg.requestId);
 
           if (!entry) {

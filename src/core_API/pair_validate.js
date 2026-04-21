@@ -155,6 +155,33 @@ const process_user_block = (db, nodes) => async (user) => {
   }
 };
 
+const getSampledNodes = (onlineEntries) => {
+  const admins = onlineEntries.filter(
+    ([id, ws]) => ws._session?.nodeType === "admin",
+  );
+  const clients = onlineEntries.filter(
+    ([id, ws]) => ws._session?.nodeType !== "admin",
+  );
+
+  const totalClients = clients.length;
+  let sampleSize = totalClients;
+
+  if (totalClients > 2000) {
+    sampleSize = Math.floor(totalClients * 0.7);
+  } else if (totalClients > 200) {
+    sampleSize = Math.floor(totalClients * 0.8);
+  }
+  if (totalClients > 5000) {
+    sampleSize = Math.floor(totalClients * 0.6);
+  }
+
+  const sampledClients = clients
+    .sort(() => 0.5 - Math.random())
+    .slice(0, sampleSize);
+
+  return [...admins, ...sampledClients];
+};
+
 const get_vote = async (
   db,
   client_hash,
@@ -181,12 +208,15 @@ const get_vote = async (
     const Signature = signer.sign(PRIVATE_KEY, "base64");
 
     const voteRoundId = crypto.randomUUID();
-    const onlineEntries = [];
+
+    const rawOnlineEntries = [];
     for (const [nodeId, ws] of nodes) {
       if (ws && ws.readyState === ws.OPEN) {
-        onlineEntries.push([nodeId, ws]);
+        rawOnlineEntries.push([nodeId, ws]);
       }
     }
+
+    const onlineEntries = getSampledNodes(rawOnlineEntries);
 
     const expectedVotes = onlineEntries.length;
 
@@ -216,34 +246,41 @@ const get_vote = async (
       });
     });
 
-    for (const [nodeId, ws] of onlineEntries) {
-      const nodeData = await db.peer_map.findByPk(nodeId);
-      if (!nodeData) continue;
+    const votePromises = onlineEntries.map(async ([nodeId, ws]) => {
+      try {
+        const nodeData = await db.peer_map.findByPk(nodeId);
+        if (!nodeData) return;
 
-      if (nodeData.node_type === "admin") admin_online++;
-      else client_online++;
-      const sessionId = ws._session.sessionId;
-      console.log("sessionId: ", sessionId);
-      ws.send(
-        JSON.stringify({
-          type: "command",
-          command: "get_vote",
-          sessionId: sessionId,
-          requestId: uuidv4(),
-          voteRoundId,
-          payload: {
-            client_hash,
-            Signature,
-            Public_key: PUBLIC_KEY,
-            current_id,
-            type,
-            command_type,
-            status,
-          },
-          serverTime: Date.now(),
-        }),
-      );
-    }
+        if (nodeData.node_type === "admin") admin_online++;
+        else client_online++;
+
+        const sessionId = ws._session?.sessionId;
+
+        return ws.send(
+          JSON.stringify({
+            type: "command",
+            command: "get_vote",
+            sessionId,
+            requestId: uuidv4(),
+            voteRoundId,
+            payload: {
+              client_hash,
+              Signature,
+              Public_key: PUBLIC_KEY,
+              current_id,
+              type,
+              command_type,
+              status,
+            },
+            serverTime: Date.now(),
+          }),
+        );
+      } catch (err) {
+        console.error(`Lỗi gửi vote cho node ${nodeId}:`, err);
+      }
+    });
+
+    await Promise.all(votePromises);
 
     const result = await waitVoteRound;
 
@@ -257,7 +294,7 @@ const get_vote = async (
         vote.signature,
       );
 
-      if (!isValid) {
+      if (!isValid || !vote.ok) {
         if (nodeData.node_type === "admin") vote_admin_false++;
         else vote_client_false++;
 
@@ -275,31 +312,13 @@ const get_vote = async (
     }
 
     const total_online = admin_online + client_online;
-
-    const admin_pass = vote_admin_true >= Math.ceil((admin_online * 5) / 6);
-
+    const admin_pass = vote_admin_true >= Math.ceil((admin_online * 2) / 3);
     const client_block =
       client_online > 0 &&
       vote_client_true + vote_client_false > 0 &&
       vote_client_false > vote_client_true;
 
     const quorum_pass = admin_pass && !client_block;
-
-    console.log("[VOTE ROUND]", {
-      voteRoundId,
-      expectedVotes,
-      receivedVotes: result.votes.length,
-      timeout: result.timeout,
-      admin_online,
-      client_online,
-    });
-
-    console.log("[VOTE QUORUM CHECK]", {
-      admin_pass,
-      client_block,
-      admin: { true: vote_admin_true, false: vote_admin_false },
-      client: { true: vote_client_true, false: vote_client_false },
-    });
 
     return {
       RM: quorum_pass ? "Vote PASSED" : "Vote REJECTED",
@@ -318,7 +337,7 @@ const get_vote = async (
         },
         total: {
           online: total_online,
-          total: nodes.size,
+          total: nodes.size, // Tổng số node đang quản lý
           ratio: nodes.size > 0 ? total_online / nodes.size : 0,
         },
         vote_map,
@@ -373,7 +392,6 @@ const pair_request = async (db, payload, nodes, type) => {
         );
 
         const result = await waitResponse;
-        console.log("result in pair request: ", result);
         if (result.timeout) {
           console.log("TIMEOUT PAIR REQUEST");
           peer_map_list[nodeId] = false;

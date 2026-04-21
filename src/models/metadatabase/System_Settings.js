@@ -4,7 +4,6 @@ export default (sequelize, DataTypes) => {
     {
       key: {
         type: DataTypes.STRING,
-        unique: true,
         allowNull: false,
       },
       title: {

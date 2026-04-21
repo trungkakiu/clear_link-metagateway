@@ -17,8 +17,32 @@ const sequelize = new Sequelize(
     port: process.env.META_DB_PORT || 3399,
     dialect: "mysql",
     logging: false,
-    dialectOptions: { multipleStatements: true },
-  }
+    dialectOptions: {
+      multipleStatements: true,
+      connectTimeout: 30000,
+    },
+
+    pool: {
+      max: 10,
+      min: 0,
+      acquire: 30000,
+      idle: 2000,
+      evict: 1000,
+    },
+
+    retry: {
+      match: [
+        /Deadlock/i,
+        /SequelizeConnectionError/,
+        /SequelizeConnectionRefusedError/,
+        /SequelizeHostNotFoundError/,
+        /SequelizeHostNotReachableError/,
+        /SequelizeInvalidConnectionError/,
+        /SequelizeConnectionTimedOutError/,
+      ],
+      max: 3,
+    },
+  },
 );
 
 const files = fs.readdirSync(__dirname).filter((file) => {
@@ -31,16 +55,39 @@ const files = fs.readdirSync(__dirname).filter((file) => {
 });
 
 for (const file of files) {
-  const filePath = path.join(__dirname, file);
-  const fileUrl = pathToFileURL(filePath).href;
-  const modelModule = await import(fileUrl);
-  const model = modelModule.default(sequelize, DataTypes);
-  db[model.name] = model;
+  try {
+    const filePath = path.join(__dirname, file);
+    const fileUrl = pathToFileURL(filePath).href;
+    const modelModule = await import(fileUrl);
+
+    if (modelModule && typeof modelModule.default === "function") {
+      const model = modelModule.default(sequelize, DataTypes);
+      db[model.name] = model;
+    } else {
+      console.warn(
+        `>>> [SKIP] File ${file} không export default đúng cấu trúc model!`,
+      );
+    }
+  } catch (error) {
+    console.error(`>>> [CRITICAL ERROR] Lỗi tại file model: ${file}`);
+    console.error(error.message);
+  }
 }
 
 Object.keys(db).forEach((modelName) => {
-  if (db[modelName].associate) db[modelName].associate(db);
+  if (db[modelName].associate) {
+    try {
+      db[modelName].associate(db);
+    } catch (assocError) {
+      console.error(
+        `>>> [ASSOC ERROR] Lỗi liên kết tại model: ${modelName}`,
+        assocError,
+      );
+    }
+  }
 });
+
+// await sequelize.sync({ alter: true });
 
 db.sequelize = sequelize;
 db.Sequelize = Sequelize;

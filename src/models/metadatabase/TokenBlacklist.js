@@ -7,7 +7,7 @@ export default (sequelize, DataTypes) => {
         primaryKey: true,
       },
       token: {
-        type: DataTypes.STRING,
+        type: DataTypes.TEXT,
         allowNull: false,
       },
       Actor_id: {
@@ -22,7 +22,7 @@ export default (sequelize, DataTypes) => {
     {
       tableName: "TokenBlacklist",
       timestamps: true,
-    }
+    },
   );
   TokenBlacklist.associate = (models) => {
     TokenBlacklist.belongsTo(models.Actor_model, {

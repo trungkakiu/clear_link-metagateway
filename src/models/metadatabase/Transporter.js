@@ -16,7 +16,7 @@ export default (sequelize, DataTypes) => {
           "pending",
           "in_down_progess",
           "donw",
-          "not_active"
+          "not_active",
         ),
       },
       company_name: {
@@ -35,21 +35,45 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.JSON,
         allowNull: false,
       },
-      contact_manager: {
+      contact_person: {
         type: DataTypes.STRING,
         defaultValue: "03xxxxxxx",
         allowNull: false,
       },
+      address_detail: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      location: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      longitude: {
+        type: DataTypes.DECIMAL(11, 8),
+        allowNull: true,
+      },
+      latitude: {
+        type: DataTypes.DECIMAL(11, 8),
+        allowNull: true,
+      },
       contact_phone: {
         type: DataTypes.STRING,
         allowNull: false,
+      },
+      logo: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      chain_status: {
+        type: DataTypes.ENUM("pending", "pairing", "not_pair", "active"),
+        defaultValue: "pending",
       },
     },
     {
       tableName: "Transporter",
       timestamps: true,
       underscored: false,
-    }
+    },
   );
 
   Transporter.associate = (models) => {
@@ -60,6 +84,78 @@ export default (sequelize, DataTypes) => {
       as: "actor_owner",
       onDelete: "CASCADE",
       onUpdate: "CASCADE",
+    });
+    Transporter.hasMany(models.Company_Policy, {
+      foreignKey: "company_id",
+      as: "company_policies",
+      constraints: false,
+    });
+
+    Transporter.hasMany(models.Pinned_Products, {
+      foreignKey: "owner_id",
+      constraints: false,
+      scope: { receiver_type: "TRANSPORTER" },
+      as: "Owner_pfl",
+    });
+
+    Transporter.hasMany(models.Pinned_Products, {
+      foreignKey: "pinner_id",
+      constraints: false,
+      scope: { receiver_type: "TRANSPORTER" },
+      as: "Pinner_pfl",
+    });
+    Transporter.hasOne(models.shipping_price_config, {
+      foreignKey: "Author",
+      as: "base_price",
+      onDelete: "CASCADE",
+      onUpdate: "CASCADE",
+    });
+    Transporter.hasMany(models.Warehouse, {
+      foreignKey: "author",
+      constraints: false,
+      scope: { warehouse_type: "TRANSPORTER" },
+      as: "warehouses_t",
+    });
+    Transporter.belongsToMany(models.Production_Sector, {
+      through: {
+        model: "Company_Sector",
+        scope: {
+          company_type: "Transporter",
+        },
+      },
+      constraints: false,
+      foreignKey: "company_id",
+      otherKey: "sector_id",
+      as: "production_sectors",
+    });
+
+    Transporter.hasOne(models.Company_market_info, {
+      foreignKey: "company_id",
+      as: "market_info",
+      constraints: false,
+      scope: {
+        company_type: "Transporter",
+      },
+    });
+
+    Transporter.hasOne(models.shipping_price_config, {
+      foreignKey: "Author",
+      as: "Order_price",
+      constraints: true,
+    });
+
+    Transporter.hasMany(models.Company_Collaboration, {
+      foreignKey: "sender_id",
+      constraints: false,
+      scope: { sender_type: "TRANSPORTER" },
+      as: "sent_proposals",
+    });
+
+    Transporter.hasMany(models.Company_Collaboration, {
+      foreignKey: "receiver_id",
+      constraints: false,
+      scope: { receiver_type: "TRANSPORTER" },
+      as: "received_proposals",
     });
     Transporter.belongsToMany(models.Distributor, {
       through: "Distributor_Transporter",

@@ -51,7 +51,7 @@ export default (sequelize, DataTypes) => {
       createdAt: "created_at",
       updatedAt: "updated_at",
       underscored: true,
-    }
+    },
   );
 
   return Global_Node;

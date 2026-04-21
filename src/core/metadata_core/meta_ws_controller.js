@@ -173,6 +173,171 @@ const auto_pair_product = async (db, nodes) => {
   }
 };
 
+const auto_pair_company = async (db, nodes) => {
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOAPC" },
+    });
+    if (!settings || settings.enabled !== true) {
+      return { ok: false, msg: "Tự động kích hoạt doanh nghiệp đang bị tắt." };
+    }
+
+    const [manufactors, retailers, distributors, transporters] =
+      await Promise.all([
+        db.Manufacturer.findAll({
+          where: {
+            chain_status: "pending",
+            status: "active",
+            license_number: {
+              [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
+            },
+
+            company_name: {
+              [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
+            },
+          },
+          limit: 2,
+        }),
+        db.Retailer.findAll({
+          where: {
+            chain_status: "pending",
+            status: "active",
+            license_number: {
+              [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
+            },
+
+            company_name: {
+              [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
+            },
+          },
+          limit: 2,
+        }),
+        db.Distributor.findAll({
+          where: {
+            chain_status: "pending",
+            status: "active",
+            license_number: {
+              [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
+            },
+
+            company_name: {
+              [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
+            },
+          },
+          limit: 2,
+        }),
+        db.Transporter.findAll({
+          where: {
+            chain_status: "pending",
+            status: "active",
+            license_number: {
+              [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
+            },
+
+            company_name: {
+              [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
+            },
+          },
+          limit: 2,
+        }),
+      ]);
+
+    const company_all = [
+      ...manufactors,
+      ...retailers,
+      ...distributors,
+      ...transporters,
+    ];
+
+    if (company_all.length === 0) {
+      return { ok: false, msg: "Không có doanh nghiệp nào đang chờ xử lý." };
+    }
+
+    const result_map = [];
+
+    for (const company of company_all) {
+      await company.update({ chain_status: "pairing" });
+
+      const item_result = {
+        company_id: company.id,
+        status: "pairing",
+        vote: null,
+        commit: null,
+      };
+
+      const raw = `${company.id}|${company.company_name}|${company.license_number || "no_tax"}`;
+      const company_hash = crypto
+        .createHash("sha256")
+        .update(raw)
+        .digest("hex");
+
+      const vote_results = await pair_validate.get_vote(
+        db,
+        company_hash,
+        company.id,
+        "company_register",
+        "active",
+        nodes,
+        "new",
+      );
+
+      item_result.vote = vote_results;
+
+      if (vote_results.RC !== 200 || !vote_results.RD?.quorum_pass) {
+        item_result.status = "vote_failed";
+        await company.update({ chain_status: "pending" });
+        result_map.push(item_result);
+        continue;
+      }
+
+      const payload = {
+        timestamp: Date.now(),
+        payload: {
+          current_id: company.id,
+          type: "company_onboarding",
+          Owner_id: company.actor_id,
+          hash: company_hash,
+          version: "1.0.0",
+          detail: "on chain company/store",
+          original_value: "",
+          status: "active",
+        },
+      };
+
+      const commitResp = await pair_validate.pair_request(
+        db,
+        payload,
+        nodes,
+        "pair_other",
+      );
+
+      item_result.commit = commitResp;
+
+      const required_nodes = Math.ceil((vote_results.RD.admin.online * 5) / 6);
+
+      if (commitResp.RC === 200 && commitResp.RD?.complate >= required_nodes) {
+        await company.update({ chain_status: "active" });
+        item_result.status = "success";
+        console.log(`[OK] Doanh nghiệp ${company.id} đã ON-CHAIN.`);
+      } else {
+        await company.update({ chain_status: "pending" });
+        item_result.status = "commit_failed";
+      }
+
+      result_map.push(item_result);
+    }
+
+    return {
+      ok: true,
+      msg: `Đã xử lý xong ${company_all.length} doanh nghiệp.`,
+      results: result_map,
+    };
+  } catch (error) {
+    console.error("[auto_pair_company ERROR]", error);
+    return { ok: false, msg: "Lỗi hệ thống nội bộ.", error: error.message };
+  }
+};
+
 const broadcastToFE = (payload) => {
   for (const ws of feSockets) {
     if (ws.readyState === ws.OPEN) {
@@ -240,7 +405,7 @@ const getNodeBaseInfomation = (nodes, db) => async (req, res) => {
 const requestNodeStatus = async (nodes, NodeID) => {
   try {
     const requestId = uuidv4();
-    console.log("requestNodeStatus for NodeID:", NodeID);
+
     if (!NodeID) {
       return {
         RC: -400,
@@ -331,7 +496,7 @@ const get_global_node = async (db, nodes) => {
 
     if (adminNodes.length === 0) {
       return {
-        RM: "No admin node online",
+        RM: "[NO ADMIN ONLINE IN SYSTEM!]",
         RC: 409,
         RD: {},
       };
@@ -499,7 +664,6 @@ const auto_pair_user = async (db, nodes) => {
         msg: "Auto approve user is disabled.",
       };
     }
-    console.log("PAIR USER");
     const user_list = await db.Actor_model.findAll({
       where: {
         role_active: "active",
@@ -517,7 +681,7 @@ const auto_pair_user = async (db, nodes) => {
         msg: "Không có người dùng pending.",
       };
     }
-    console.log("USER LIST LENGTH: ", user_list.length);
+
     const result_map = {};
 
     for (const user of user_list) {
@@ -592,7 +756,7 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
 
     if (adminNodes.length === 0) {
       console.warn(`[${syncId}] NO ADMIN NODE ONLINE`);
-      return { RM: "No admin node online", RC: 409, RD: [] };
+      return { RM: "[NO ADMIN ONLINE IN SYSTEM!]", RC: 409, RD: [] };
     }
 
     const quorum = Math.floor(adminNodes.length / 2) + 1;
@@ -606,7 +770,6 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
 
         const requestId = uuidv4();
 
-        console.log("Helper__funtion.waitRpc =", Helper__funtion.waitRpc);
         const waitResponse = Helper__funtion.waitRpc(requestId, 3000);
 
         ws.send(
@@ -1019,7 +1182,6 @@ const Drop_block = async (db, nodes) => {
     });
 
     if (drop_list.length < 1) {
-      console.log("NO PRODUCT TO DROP → EXIT");
       return;
     }
 
@@ -1141,11 +1303,431 @@ const signature_rawdata = async (canonicalVotes) => {
   return signer.sign(KeyStore.getPrivateKey(), "base64");
 };
 
+const auto_pair_contract = async (db, nodes) => {
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOACT" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return {
+        ok: false,
+        msg: "Tự động kích hoạt hợp đồng (On-chain) đang bị tắt.",
+      };
+    }
+
+    const pendingContracts = await db.Company_Collaboration.findAll({
+      where: {
+        status: "official",
+        onchain_status: "pending",
+      },
+      limit: 2,
+      order: [["official_at", "ASC"]],
+    });
+
+    if (pendingContracts.length === 0) {
+      return { ok: true, msg: "Không có hợp đồng nào đang chờ On-chain." };
+    }
+
+    const result_map = [];
+
+    for (const contract of pendingContracts) {
+      await contract.update({ onchain_status: "pairing" });
+
+      const item_result = {
+        contract_id: contract.id,
+        status: "pairing",
+        vote: null,
+        commit: null,
+      };
+
+      const raw = `${contract.id}|${contract.sender_id}|${contract.receiver_id}|${contract.nda_hash}|`;
+      const contract_hash = crypto
+        .createHash("sha256")
+        .update(raw)
+        .digest("hex");
+
+      const vote_results = await pair_validate.get_vote(
+        db,
+        contract_hash,
+        contract.id,
+        "contract_official",
+        "active",
+        nodes,
+        "new",
+      );
+
+      item_result.vote = vote_results;
+
+      if (vote_results.RC !== 200 || !vote_results.RD?.quorum_pass) {
+        item_result.status = "vote_failed";
+        await contract.update({ onchain_status: "pending" });
+        result_map.push(item_result);
+        continue;
+      }
+
+      const payload = {
+        timestamp: Date.now(),
+        payload: {
+          current_id: contract.id,
+          type: "contract_official",
+          hash: contract_hash,
+          version: "1.0.1",
+          Owner_id: `${contract.sender_id}|${contract.receiver_id}`,
+          detail: `Collaboration: ${contract.collaboration_type}`,
+          status: "official",
+        },
+      };
+
+      const commitResp = await pair_validate.pair_request(
+        db,
+        payload,
+        nodes,
+        "pair_other",
+      );
+
+      item_result.commit = commitResp;
+
+      const required_nodes = Math.ceil((vote_results.RD.admin.online * 5) / 6);
+
+      if (commitResp.RC === 200 && commitResp.RD?.complate >= required_nodes) {
+        await contract.update({ onchain_status: "on-chain" });
+        item_result.status = "success";
+        console.log(
+          `[BLOCKCHAIN] Hợp đồng ${contract.id} đã On-chain thành công.`,
+        );
+      } else {
+        await contract.update({ onchain_status: "pending" });
+        item_result.status = "commit_failed";
+      }
+
+      result_map.push(item_result);
+    }
+
+    return {
+      ok: true,
+      msg: `Đã xử lý On-chain cho ${pendingContracts.length} hợp đồng.`,
+      results: result_map,
+    };
+  } catch (error) {
+    console.error("[auto_pair_contract ERROR]", error);
+    return {
+      ok: false,
+      msg: "Lỗi hệ thống khi On-chain hợp đồng.",
+      error: error.message,
+    };
+  }
+};
+
+const Auto_pair_batched = async (db, nodes) => {
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOAPB" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return { ok: false, msg: "Tự động kích hoạt duyệt lô hàng đang bị tắt." };
+    }
+
+    const pendingBatches = await db.product_batch.findAll({
+      where: {
+        status: "pending",
+      },
+      limit: 5,
+      order: [["updatedAt", "ASC"]],
+    });
+
+    if (pendingBatches.length === 0) {
+      return { ok: true, msg: "Không có lô hàng nào đang chờ On-chain." };
+    }
+
+    const result_map = [];
+
+    for (const batch of pendingBatches) {
+      await batch.update({ status: "pairing" });
+
+      const item_result = {
+        batch_id: batch.id,
+        status: "pairing",
+        vote: null,
+        commit: null,
+      };
+
+      const raw = `${batch.id}|${batch.product_id}|${batch.QC_Pass}|${batch.QC_Failed}|${batch.qc_manager_id}`;
+      const batch_hash = crypto.createHash("sha256").update(raw).digest("hex");
+      const vote_results = await pair_validate.get_vote(
+        db,
+        batch_hash,
+        batch.id,
+        "Batch_completed",
+        "active",
+        nodes,
+        "new",
+      );
+
+      item_result.vote = vote_results;
+
+      if (vote_results.RC !== 200 || !vote_results.RD?.quorum_pass) {
+        item_result.status = "vote_failed";
+        await batch.update({ status: "pending" });
+        result_map.push(item_result);
+        continue;
+      }
+
+      const payload = {
+        timestamp: Date.now(),
+        payload: {
+          current_id: batch.id,
+          type: "Batch_complate",
+          hash: batch_hash,
+          version: "1.0.2",
+          Owner_id: batch.author,
+          detail: `Batch: ${batch.batch_name} | Pass: ${batch.QC_Pass} | Fail: ${batch.QC_Failed}`,
+          status: "active",
+        },
+      };
+
+      const commitResp = await pair_validate.pair_request(
+        db,
+        payload,
+        nodes,
+        "pair_other",
+      );
+
+      item_result.commit = commitResp;
+
+      const required_nodes = Math.ceil((vote_results.RD.admin.online * 5) / 6);
+
+      if (commitResp.RC === 200 && commitResp.RD?.complate >= required_nodes) {
+        await batch.update({ status: "completed" });
+        item_result.status = "success";
+        console.log(`[BLOCKCHAIN] Lô hàng ${batch.id} đã On-chain thành công.`);
+      } else {
+        await batch.update({ status: "pending" });
+        item_result.status = "commit_failed";
+      }
+
+      result_map.push(item_result);
+    }
+
+    return {
+      ok: true,
+      msg: `Đã xử lý On-chain cho ${pendingBatches.length} lô hàng.`,
+      results: result_map,
+    };
+  } catch (error) {
+    console.error("[auto_pair_batch ERROR]", error);
+    return {
+      ok: false,
+      msg: "Lỗi hệ thống khi On-chain lô hàng.",
+      error: error.message,
+    };
+  }
+};
+
+const Auto_pair_shipingorder = async (db, nodes) => {
+  const processingIds = [];
+
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOASO" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return { ok: false, msg: "Tự động kích hoạt duyệt vận đơn đang bị tắt." };
+    }
+
+    const pendingOrders = await db.shipping_order.findAll({
+      where: {
+        [db.Sequelize.Op.or]: [
+          {
+            onchain_status: "agreement_pending",
+            status: "proposed",
+            sender_confirm: "confirmed",
+            receiver_confirm: "accepted",
+            transporter_confirm: "accepted",
+          },
+          {
+            status: "shipping",
+            onchain_status: "agreement_hashed",
+            sender_confirm: "confirmed",
+            receiver_confirm: "accepted",
+            transporter_confirm: "accepted",
+          },
+          {
+            status: "delivered",
+            onchain_status: "pickup_verified",
+            sender_confirm: "confirmed",
+            receiver_confirm: "accepted",
+            transporter_confirm: "accepted",
+          },
+        ],
+      },
+      include: [{ model: db.product_batch, as: "batches", attributes: ["id"] }],
+      limit: 10,
+      order: [["updatedAt", "ASC"]],
+    });
+
+    if (pendingOrders.length === 0) {
+      return { ok: true, msg: "Không có gì để lên chain." };
+    }
+    pendingOrders.forEach((o) => processingIds.push(o.id));
+
+    for (const order of pendingOrders) {
+      const oldOnchainStatus = order.onchain_status;
+      let type = "";
+      let targetStatus = "";
+      let detailMsg = "";
+
+      switch (true) {
+        case oldOnchainStatus === "agreement_pending":
+          type = "Shipping_Agreement";
+          targetStatus = "agreement_hashed";
+          detailMsg = `Khởi tạo vận đơn: ${order.id}`;
+          break;
+
+        case order.status === "shipping":
+          type = "Shipping_In_Transit";
+          targetStatus = "pickup_verified";
+          detailMsg = `Hàng xuất kho: ${order.id}`;
+          break;
+
+        case order.status === "delivered":
+          type = "Shipping_Delivered";
+          targetStatus = "delivery_signed";
+          detailMsg = `Hàng đã giao: ${order.id}`;
+          break;
+
+        default:
+          console.log(`[TRACECHAIN] Bỏ qua ${order.id} - Không khớp case.`);
+          continue;
+      }
+
+      const batchIds = order.batches?.map((b) => b.id).join(",") || "no_batch";
+      const raw = `${order.id}|${order.status}|${oldOnchainStatus}|${batchIds}|${order.total_ship_price}|${order.total_quantity}|${order.product_total_price}|${order.sender_id}|${order.customer_id}|${order.shipping_partner}`;
+      const order_hash = crypto.createHash("sha256").update(raw).digest("hex");
+
+      await order.update({ onchain_status: "pairing" });
+
+      try {
+        const vote_results = await pair_validate.get_vote(
+          db,
+          order_hash,
+          order.id,
+          type,
+          "active",
+          nodes,
+          "new",
+        );
+
+        if (vote_results.RC === 200 && vote_results.RD?.quorum_pass) {
+          const payload = {
+            timestamp: Date.now(),
+            payload: {
+              current_id: order.id,
+              type: type,
+              hash: order_hash,
+              detail: detailMsg,
+              status: "active",
+            },
+          };
+
+          const commitResp = await pair_validate.pair_request(
+            db,
+            payload,
+            nodes,
+            "pair_other",
+          );
+
+          const online_admins = vote_results.RD.admin.online || 1;
+          const required_nodes = Math.ceil((online_admins * 5) / 6);
+
+          if (
+            commitResp.RC === 200 &&
+            commitResp.RD?.complate >= required_nodes
+          ) {
+            await order.update({ onchain_status: targetStatus });
+            console.log(`[TRACECHAIN] ${order.id} - ON-CHAIN SUCCESS.`);
+          } else {
+            await order.update({ onchain_status: oldOnchainStatus });
+          }
+        } else {
+          await order.update({ onchain_status: oldOnchainStatus });
+        }
+      } catch (innerError) {
+        console.error(
+          `[TRACECHAIN] Lỗi xử lý đơn ${order.id}:`,
+          innerError.message,
+        );
+
+        await order.update({ onchain_status: oldOnchainStatus });
+      }
+    }
+
+    return { ok: true, msg: "Tiến trình hoàn tất." };
+  } catch (error) {
+    console.error("[Auto_pair_shipingorder CRITICAL ERROR]", error);
+
+    if (processingIds.length > 0) {
+      console.log(
+        `>>> [RESCUE] Đang giải cứu ${processingIds.length} đơn hàng bị kẹt...`,
+      );
+      try {
+        await db.shipping_order.update(
+          { onchain_status: "agreement_pending" },
+          {
+            where: {
+              id: processingIds,
+              onchain_status: "pairing",
+              status: "proposed",
+            },
+          },
+        );
+        await db.shipping_order.update(
+          { onchain_status: "agreement_hashed" },
+          {
+            where: {
+              id: processingIds,
+              onchain_status: "pairing",
+              status: "shipping",
+            },
+          },
+        );
+        await db.shipping_order.update(
+          { onchain_status: "pickup_verified" },
+          {
+            where: {
+              id: processingIds,
+              onchain_status: "pairing",
+              status: "delivered",
+            },
+          },
+        );
+      } catch (rescueErr) {
+        console.error(
+          ">>> [FATAL] Cứu hộ thất bại nặng nề:",
+          rescueErr.message,
+        );
+      }
+    }
+
+    return {
+      ok: false,
+      msg: "Lỗi hệ thống nghiêm trọng, đã thực hiện cứu hộ đơn hàng.",
+      error: error.message,
+    };
+  }
+};
+
 export default {
   waitVoteRound,
+  Auto_pair_shipingorder,
+  Auto_pair_batched,
+  auto_pair_contract,
   auto_pair_product,
   Drop_block,
   getNodeBaseInfomation,
+  auto_pair_company,
   signature_rawdata,
   get_global_node,
   getBlockFormHeight,

@@ -48,6 +48,18 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: true,
       },
+      fcm_token: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      Session_id: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      User_agent: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
       role_active: {
         type: DataTypes.ENUM("pending", "not_active", "active"),
         defaultValue: "not_active",
@@ -70,7 +82,7 @@ export default (sequelize, DataTypes) => {
           "user",
           "manufacturer",
           "distributor",
-          "retailer"
+          "retailer",
         ),
         allowNull: false,
         defaultValue: "user",
@@ -85,7 +97,7 @@ export default (sequelize, DataTypes) => {
       tableName: "Actor_model",
       timestamps: true,
       underscored: false,
-    }
+    },
   );
 
   Actor_model.associate = (models) => {
@@ -136,6 +148,27 @@ export default (sequelize, DataTypes) => {
       foreignKey: "actor_id",
       sourceKey: "id",
       as: "Transporters",
+      onDelete: "SET NULL",
+      onUpdate: "CASCADE",
+    });
+    Actor_model.hasOne(models.ProductionStaff, {
+      foreignKey: "actor_id",
+      sourceKey: "id",
+      as: "production_staff_info",
+      onDelete: "CASCADE",
+      onUpdate: "CASCADE",
+    });
+    Actor_model.hasMany(models.product_batch, {
+      foreignKey: "qc_staff_id",
+      sourceKey: "id",
+      as: "Product_QC",
+      onDelete: "SET NULL",
+      onUpdate: "CASCADE",
+    });
+    Actor_model.hasMany(models.product_batch, {
+      foreignKey: "qc_manager_id",
+      sourceKey: "id",
+      as: "Product_QC_Manager",
       onDelete: "SET NULL",
       onUpdate: "CASCADE",
     });

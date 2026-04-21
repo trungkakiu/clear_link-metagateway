@@ -16,22 +16,38 @@ export default (sequelize, DataTypes) => {
           "pending",
           "in_down_progess",
           "donw",
-          "not_active"
+          "not_active",
         ),
       },
       company_name: {
         type: DataTypes.STRING,
         allowNull: false,
       },
+      address_detail: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      location: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      longitude: {
+        type: DataTypes.DECIMAL(11, 8),
+        allowNull: true,
+      },
+      latitude: {
+        type: DataTypes.DECIMAL(11, 8),
+        allowNull: true,
+      },
       license_number: {
         type: DataTypes.STRING,
         allowNull: false,
       },
-      warehouse_location: {
+      delivery_capacity: {
         type: DataTypes.STRING,
         allowNull: true,
       },
-      delivery_capacity: {
+      logo: {
         type: DataTypes.STRING,
         allowNull: true,
       },
@@ -43,12 +59,16 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: false,
       },
+      chain_status: {
+        type: DataTypes.ENUM("pending", "pairing", "not_pair", "active"),
+        defaultValue: "pending",
+      },
     },
     {
       tableName: "Distributor",
       timestamps: true,
       underscored: false,
-    }
+    },
   );
 
   Distributor.associate = (models) => {
@@ -63,6 +83,66 @@ export default (sequelize, DataTypes) => {
       as: "actor_owner",
       onDelete: "CASCADE",
       onUpdate: "CASCADE",
+    });
+    Distributor.belongsToMany(models.Production_Sector, {
+      through: {
+        model: "Company_Sector",
+        scope: {
+          company_type: "Distributor",
+        },
+      },
+      constraints: false,
+      foreignKey: "company_id",
+      otherKey: "sector_id",
+      as: "production_sectors",
+    });
+    Distributor.hasMany(models.Company_Policy, {
+      foreignKey: "company_id",
+      as: "company_policies",
+      constraints: false,
+    });
+    Distributor.hasMany(models.Company_Collaboration, {
+      foreignKey: "sender_id",
+      constraints: false,
+      scope: { sender_type: "DISTRIBUTOR" },
+      as: "sent_proposals",
+    });
+
+    Distributor.hasMany(models.Pinned_Products, {
+      foreignKey: "owner_id",
+      constraints: false,
+      scope: { receiver_type: "DISTRIBUTOR" },
+      as: "Owner_pfl",
+    });
+
+    Distributor.hasMany(models.Pinned_Products, {
+      foreignKey: "pinner_id",
+      constraints: false,
+      scope: { receiver_type: "DISTRIBUTOR" },
+      as: "Pinner_pfl",
+    });
+
+    Distributor.hasMany(models.Company_Collaboration, {
+      foreignKey: "receiver_id",
+      constraints: false,
+      scope: { receiver_type: "DISTRIBUTOR" },
+      as: "received_proposals",
+    });
+
+    Distributor.hasMany(models.Warehouse, {
+      foreignKey: "author",
+      constraints: false,
+      scope: { warehouse_type: "DISTRIBUTOR" },
+      as: "warehouses_d",
+    });
+
+    Distributor.hasOne(models.Company_market_info, {
+      foreignKey: "company_id",
+      as: "market_info",
+      constraints: false,
+      scope: {
+        company_type: "Distributor",
+      },
     });
   };
 

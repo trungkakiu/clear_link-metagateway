@@ -2,6 +2,7 @@ import axios from "axios";
 import bcrypt from "bcrypt";
 import db from "../../models/metadatabase/index.js";
 import JwtAction from "../../utils/JwtAction.js";
+import { v4 as uuidv4 } from "uuid";
 import crypto from "crypto";
 import Helper__funtion from "../../utils/Helper__funtion.js";
 import pkg from "elliptic";
@@ -10,10 +11,12 @@ import dotenv from "dotenv";
 import nodemailer from "nodemailer";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import path from "path";
+import path, { join } from "path";
 import { Op, where } from "sequelize";
 import { pendingRequests } from "../../../meta_server.js";
 import { raw } from "express";
+import meta_core_controller from "./meta_core_controller.js";
+import NotificationService from "./NotificationService.js";
 
 dotenv.config();
 const { ec } = pkg;
@@ -179,11 +182,21 @@ const AdminLoginActive = async (req, res) => {
       });
     }
 
+    const user_agent = req.headers["user-agent"] || "Unknown-Browser";
+    const newSessionId = uuidv4();
+
+    await user.update({
+      User_agent: user_agent,
+      Session_id: newSessionId,
+    });
+
     const token = await JwtAction.JwtSign({
       id: user.id,
       email: user.email,
       name: user.name,
       role: user.role,
+      User_agent: user_agent,
+      session_id: newSessionId,
     });
 
     delete user.password;
@@ -194,13 +207,14 @@ const AdminLoginActive = async (req, res) => {
       phone_number: user.phone_number,
       avatar: user.avatar,
       role: user.role,
+      session_id: newSessionId,
     };
 
     return res.status(200).json({
       RM: "Login successfully!",
       RC: 200,
       RD: {
-        User: userData,
+        Admin: userData,
         Token: token,
       },
     });
@@ -360,8 +374,10 @@ const checkUserOTP = () => async (req, res) => {
       });
     }
 
+    console.log(session.challenge_code, " and ", session.status);
+
     return res.status(200).json({
-      RM: "OTP verified successfully",
+      RM: "PIN verified successfully",
       RC: 200,
       RD: otpSessionID,
     });
@@ -617,7 +633,7 @@ const userLogin = async (req, res) => {
     }
 
     const { email, password } = req.body;
-
+    console.log;
     if (!email || !password) {
       return res
         .status(200)
@@ -625,6 +641,7 @@ const userLogin = async (req, res) => {
     }
 
     let user = null;
+    const user_agent = req.headers["user-agent"] || "Unknown-Browser";
 
     try {
       if (!isValidEmail(email)) {
@@ -657,6 +674,7 @@ const userLogin = async (req, res) => {
         RC: 500,
       });
     }
+
     if (typeof user.password !== "string" || user.password.length < 20) {
       return res.status(500).json({
         RM: "Password hash error",
@@ -677,6 +695,13 @@ const userLogin = async (req, res) => {
     if (!isMatch) {
       return res.status(200).json({ RM: "Password wrong!", RC: -203 });
     }
+
+    const newSessionId = uuidv4();
+
+    await db.Actor_model.update(
+      { Session_id: newSessionId, User_agent: user_agent },
+      { where: { id: user.id } },
+    );
     const company = await db.Company_account_level.findOne({
       where: {
         Actor_id: user.id,
@@ -689,8 +714,13 @@ const userLogin = async (req, res) => {
         email: user.email,
         name: user.name,
         role: user.role,
+        fcm_token: user.fcm_token,
+        prime: user.is_prime,
         phone_number: user.phone_number,
         company_id: company?.Company_id || "null",
+        level: company?.role_level || "null",
+        session_id: newSessionId,
+        User_agent: user_agent,
       });
     } catch (err) {
       console.log("Lỗi tạo JWT:", err);
@@ -700,7 +730,11 @@ const userLogin = async (req, res) => {
       });
     }
 
-    const userData = user.toJSON ? user.toJSON() : user;
+    const userData = {
+      ...(user.toJSON ? user.toJSON() : user),
+      level: company?.role_level || "null",
+      company_id: company?.Company_id,
+    };
 
     delete userData.password;
 
@@ -711,6 +745,7 @@ const userLogin = async (req, res) => {
         Otp: Boolean(user.public_key !== "null"),
         User: userData,
         Token: token,
+        Session_id: newSessionId,
       },
     });
   } catch (error) {
@@ -737,6 +772,10 @@ const pendingFields = {
     "store_address",
     "branch_count",
     "product_lines",
+    "location",
+    "address_detail",
+    "lat",
+    "lng",
     "contact_person",
     "contact_phone",
   ],
@@ -744,7 +783,10 @@ const pendingFields = {
   Distributor: [
     "company_name",
     "license_number",
-    "warehouse_location",
+    "location",
+    "address_detail",
+    "lat",
+    "lng",
     "delivery_capacity",
     "contact_person",
     "contact_number",
@@ -753,6 +795,10 @@ const pendingFields = {
   Manufacturer: [
     "factory_name",
     "license_number",
+    "location",
+    "address_detail",
+    "lat",
+    "lng",
     "tax_code",
     "location",
     "production_capacity",
@@ -857,7 +903,7 @@ const create_pending_profile = async (req, res) => {
           company = await db.Manufacturer.create({
             id: newId,
             actor_id: req.user.id,
-            factory_name: data.factory_name,
+            company_name: data.factory_name,
             license_number: data.license_number,
             tax_code: data.tax_code,
             location: data.location,
@@ -865,6 +911,10 @@ const create_pending_profile = async (req, res) => {
             certifications: data.certifications,
             contact_person: data.contact_person,
             contact_phone: data.contact_phone,
+            location: data.location,
+            address_detail: data.address_detail,
+            longitude: data.lng,
+            latitude: data.lat,
             status: "pending",
           });
           user.role = "manufacturer";
@@ -875,12 +925,16 @@ const create_pending_profile = async (req, res) => {
           company = await db.Retailer.create({
             id: newId,
             actor_id: req.user.id,
-            store_name: data.store_name,
+            company_name: data.store_name,
             store_address: data.store_address,
             branch_count: data.branch_count,
             product_lines: data.product_lines,
             contact_person: data.contact_person,
             contact_phone: data.contact_phone,
+            location: data.location,
+            address_detail: data.address_detail,
+            longitude: data.lng,
+            latitude: data.lat,
             status: "pending",
           });
           user.role = "retailer";
@@ -897,6 +951,10 @@ const create_pending_profile = async (req, res) => {
             operation_area: data.service_area,
             contact_manager: data.contact_person,
             contact_phone: data.contact_phone,
+            location: data.location,
+            address_detail: data.address_detail,
+            longitude: data.lng,
+            latitude: data.lat,
             status: "pending",
           });
           user.role = "transporter";
@@ -909,10 +967,13 @@ const create_pending_profile = async (req, res) => {
             actor_id: req.user.id,
             company_name: data.company_name,
             license_number: data.license_number,
-            warehouse_location: data.warehouse_location,
             delivery_capacity: data.delivery_capacity,
             contact_person: data.contact_person,
             contact_number: data.contact_number,
+            location: data.location,
+            address_detail: data.address_detail,
+            longitude: data.lng,
+            latitude: data.lat,
             status: "pending",
           });
           user.role = "distributor";
@@ -1221,12 +1282,20 @@ const getMe = (db) => async (req, res) => {
         id: user.id,
         email: user.email,
         name: user.name,
+        session_id: user.Session_id,
+        User_agent: user.User_agent,
         role: user.role,
         phone_number: user.phone_number,
+        fcm_token: user.fcm_token,
         company_id: company?.Company_id,
+        level: company?.role_level || "null",
       });
 
-      const userData = user.toJSON ? user.toJSON() : user;
+      const userData = {
+        ...(user.toJSON ? user.toJSON() : user),
+        level: company?.role_level || "null",
+        company_id: company?.Company_id,
+      };
       delete userData.password;
 
       return res.status(200).json({
@@ -1270,8 +1339,6 @@ const user_setup_login = (db) => async (req, res) => {
         RC: -203,
       });
     }
-
-    let user = null;
 
     try {
       if (!isValidEmail(email)) {
@@ -1422,20 +1489,17 @@ const get_user_actor = (db) => async (req, res) => {
 
 const getCategories = (db) => async (req, res) => {
   try {
-    const target_id = req?.user?.id;
-    if (!target_id) {
+    const { company_id } = req?.user;
+
+    if (!company_id) {
       return res.status(400).json({
         RM: "Thiếu dữ liệu đầu vào",
         RC: -203,
       });
     }
-    const manu_id = await db.Manufacturer.findOne({
-      where: {
-        actor_id: target_id,
-      },
-    });
+
     const categories = await db.Product_category.findAll({
-      where: { author: manu_id.id },
+      where: { author: company_id },
     });
 
     return res.status(200).json({
@@ -1454,9 +1518,9 @@ const getCategories = (db) => async (req, res) => {
 
 const createCategories = (db) => async (req, res) => {
   try {
-    const target_id = req?.user?.id;
+    const { company_id } = req?.user;
     const { name, description, status } = req?.body;
-    if (!target_id || !name || !status) {
+    if (!company_id || !name || !status) {
       return res.status(400).json({
         RM: "Thiếu dữ liệu đầu vào",
         RC: -203,
@@ -1466,7 +1530,7 @@ const createCategories = (db) => async (req, res) => {
     const is_exists = await db.Product_category.findOne({
       where: {
         cate_name: name,
-        author: target_id,
+        author: company_id,
       },
     });
 
@@ -1477,11 +1541,6 @@ const createCategories = (db) => async (req, res) => {
       });
     }
     let CateID;
-    const manu_id = await db.Manufacturer.findOne({
-      where: {
-        actor_id: target_id,
-      },
-    });
     do {
       CateID = Helper__funtion.genId("CATEGORY_");
     } while (
@@ -1490,7 +1549,7 @@ const createCategories = (db) => async (req, res) => {
     const cate = await db.Product_category.create({
       id: CateID,
       cate_name: name,
-      author: manu_id.id,
+      author: company_id,
       status: status,
       description: description || "",
     });
@@ -1672,6 +1731,7 @@ const auto_approve_product = async (db, product_id) => {
 
 const createRawProduct = (db) => async (req, res) => {
   try {
+    console.log("call====");
     const { id, author, responsible_person, category_id } = req.body;
     if (!id || !author || !responsible_person || !category_id) {
       return res.status(400).json({
@@ -1817,8 +1877,1351 @@ const dropUserBlock = (db) => async (req, res) => {
   }
 };
 
+const changeActiveCate = (db) => async (req, res) => {
+  try {
+    const { cate_id } = req.params;
+    if (!cate_id) {
+      return res.status(200).json({
+        RM: "Thiếu dữ liệu!",
+        RC: 203,
+      });
+    }
+
+    const cate = await db.Product_category.findByPk(cate_id);
+    if (!cate) {
+      return res.status(400).json({
+        RM: "Danh mục không tồn tại!",
+        RC: 400,
+      });
+    }
+
+    await cate.update({
+      active: !cate.active,
+    });
+
+    return res.status(200).json({
+      RM: "Done!",
+      RC: 200,
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+const getDepartment = (db) => async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    const department_list = await db.Department.findAll({
+      where: {
+        company_id: company_id,
+      },
+      include: [
+        {
+          model: db.ProductionStaff,
+          as: "leader",
+          include: [
+            {
+              model: db.Actor_model,
+              as: "actor_info",
+              attributes: [
+                "id",
+                "name",
+                "email",
+                "phone_number",
+                "role",
+                "address_1",
+                "avatar",
+                "status",
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    if (!department_list) {
+      return res.status(200).json({
+        RM: "Part null",
+        RC: 200,
+      });
+    }
+    const staff_list = await db.ProductionStaff.findAll({
+      where: {
+        Company_id: company_id,
+        status: {
+          [Op.ne]: "quit_job",
+        },
+      },
+      include: [
+        {
+          model: db.Actor_model,
+          as: "actor_info",
+          attributes: [
+            "id",
+            "name",
+            "email",
+            "phone_number",
+            "role",
+            "address_1",
+            "avatar",
+            "status",
+          ],
+        },
+      ],
+    });
+
+    return res.status(200).json({
+      RM: "Done",
+      RC: 200,
+      RD: { department_list, staff_list },
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+
+const createDepartment = (db) => async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    const { role_level, partname, isExcute, isRead, part } = req.body;
+
+    if (
+      !company_id ||
+      !role_level ||
+      !partname ||
+      isExcute == null ||
+      isRead === null ||
+      !part
+    ) {
+      return res.status(200).json({
+        RM: "missing paramater!",
+        RC: 203,
+      });
+    }
+
+    let depart_id;
+    do {
+      depart_id = Helper__funtion.genId("DEPARTMENT_");
+    } while (
+      await Helper__funtion.validCheckID(depart_id, db.Department, "id")
+    );
+
+    await db.Department.create({
+      id: depart_id,
+      role_level,
+      partname,
+      isExcute,
+      isRead,
+      part,
+      Company_id: company_id,
+    });
+
+    return res.status(200).json({
+      RM: "Tạo bộ phận thành công!",
+      RC: 200,
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+
+const editDepartment = (db) => async (req, res) => {
+  try {
+    const { part_id } = req.params;
+    const { isExcute, isRead, partname, role_level, active } = req.body.form;
+
+    if (!part_id) {
+      return res.status(400).json({
+        RM: "Thiếu dữ liệu!",
+        RC: 203,
+      });
+    }
+
+    const Part = await db.Department.findByPk(part_id);
+    if (!Part) {
+      return res.status(404).json({
+        RM: "Không tìm thấy bộ phận này!",
+        RC: 404,
+      });
+    }
+
+    await Part.update({
+      isExcute: typeof isExcute === "boolean" ? isExcute : Part.isExcute,
+      active: typeof active === "boolean" ? active : Part.active,
+      isRead: typeof isRead === "boolean" ? isRead : Part.isRead,
+
+      partname:
+        typeof partname === "string" && partname.trim()
+          ? partname.trim()
+          : Part.partname,
+
+      role_level: typeof role_level === "string" ? role_level : Part.role_level,
+    });
+
+    return res.status(200).json({
+      RM: "Thay đổi thông tin thành công!",
+      RC: 200,
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+
+const getTechnicaltaff = (db) => async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    if (!company_id) {
+      return res.status(200).json({
+        RM: "Thiếu thông tin công ty!",
+        RC: 203,
+      });
+    }
+    const department_list = await db.Department.findAll({
+      where: {
+        Company_id: company_id,
+        active: true,
+        part: "technical",
+      },
+    });
+    const stafflist = await db.ProductionStaff.findAll({
+      where: {
+        role: "technical",
+        Company_id: company_id,
+      },
+      include: [
+        {
+          model: db.Department,
+          as: "department",
+        },
+        {
+          model: db.Actor_model,
+          as: "actor_info",
+          required: false,
+          attributes: [
+            "id",
+            "name",
+            "email",
+            "phone_number",
+            "role",
+            "address_1",
+            "avatar",
+            "status",
+          ],
+        },
+      ],
+    });
+
+    return res.status(200).json({
+      RM: "Thông tin bộ phận!",
+      RC: 200,
+      RD: { stafflist, department_list },
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+
+const QR_batchverify = (db) => async (req, res) => {
+  const transaction = await db.sequelize.transaction();
+  try {
+    const { company_id, id } = req?.user;
+
+    const { QR_code, secure_token, latitude, longitude } = req?.body;
+
+    if (!QR_code || !secure_token) {
+      return res
+        .status(400)
+        .json({ RM: "Thiếu mã định danh hoặc mã bảo mật!", RC: -203 });
+    }
+
+    if (!latitude || !longitude) {
+      return res.status(400).json({
+        RM: "Thiếu tọa độ!",
+        RC: -203,
+      });
+    }
+
+    const QR = await db.QrRegistry.findOne({
+      where: {
+        id: QR_code,
+        secure_token: secure_token,
+      },
+      transaction,
+    });
+
+    if (!QR) {
+      await transaction.rollback();
+      return res.status(200).json({
+        RM: "Mã QR không hợp lệ, sai mã bảo mật hoặc đã được kích hoạt trước đó!",
+        RC: -204,
+      });
+    }
+
+    if (QR.status === "verified") {
+      await transaction.rollback();
+      return res.status(200).json({
+        RM: "Mã QR đã được xác thực trước đó!",
+        RC: -205,
+      });
+    }
+
+    if (QR.print_status !== "printed") {
+      await transaction.rollback();
+      return res.status(200).json({
+        RM: "Mã QR chưa được in ấn, không thể xác thực!",
+        RC: -206,
+      });
+    }
+
+    const batch = await db.product_batch.findOne({
+      where: { id: QR.target_id },
+      include: [
+        {
+          model: db.shipping_order,
+          as: "Order_batches",
+        },
+      ],
+      transaction,
+    });
+
+    const allbatch = await db.product_batch.findAll({
+      where: { shipping_order_id: batch.shipping_order_id },
+      transaction,
+    });
+
+    const allBox = allbatch.reduce((sum, item) => sum + item.total_box, 0);
+
+    if (!batch) {
+      await transaction.rollback();
+      return res
+        .status(200)
+        .json({ RM: "Dữ liệu lô hàng liên kết không tồn tại!", RC: -205 });
+    }
+
+    await QR.update(
+      {
+        status: "verified",
+        Actor_scaned: id,
+        blockchain_proof:
+          latitude && longitude
+            ? `LAT:${latitude}|LONG:${longitude}`
+            : QR.blockchain_proof,
+      },
+      { transaction },
+    );
+
+    const total_verify = await db.QrRegistry.findOne({
+      where: {
+        target_id: batch?.id,
+      },
+      transaction,
+    });
+
+    if (total_verify?.length === allBox) {
+      batch.update({
+        Shiping_status: "ready",
+      });
+
+      const isReady = await meta_core_controller.updateShipingStatus(db)(
+        batch.shipping_order_id,
+      );
+
+      if (isReady) {
+        await db.Notification.create({
+          Owner_id: batch.Order_batches.shipping_partner,
+          isSystemNotification: false,
+          noitfi_level: 4,
+          status: "seen",
+          message: `Đơn vận chuyển ${batch.shipping_order_id} đã sẵn sàng để vận chuyển!`,
+        });
+      }
+
+      await NotificationService.sendSmartNotification(
+        batch.Order_batches.shipping_partner,
+        "transporter",
+        `Đơn vận chuyển ${batch.shipping_order_id} đã sẵn sàng để vận chuyển!`,
+        [],
+        "order_ready",
+        "level_4",
+      );
+    }
+
+    await transaction.commit();
+
+    return res.status(200).json({
+      RM: "Xác thực định danh thành công!",
+      RC: 200,
+      RD: {
+        batch_id: batch.id,
+        qr_id: QR.id,
+        status: "verified",
+        timestamp: new Date(),
+      },
+    });
+  } catch (error) {
+    if (transaction) await transaction.rollback();
+    console.error(">>> QR Verify Error:", error);
+    return res
+      .status(500)
+      .json({ RM: "Lỗi máy chủ khi xử lý mã QR!", RC: 500 });
+  }
+};
+
+const getProductionstaff = (db) => async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    if (!company_id) {
+      return res.status(200).json({
+        RM: "missing paramater!",
+        RC: 203,
+      });
+    }
+    const department_list = await db.Department.findAll({
+      where: {
+        Company_id: company_id,
+        active: true,
+        part: "production",
+      },
+    });
+    const stafflist = await db.ProductionStaff.findAll({
+      where: {
+        role: "production",
+        Company_id: company_id,
+      },
+      include: [
+        {
+          model: db.Department,
+          as: "department",
+        },
+        {
+          model: db.Actor_model,
+          as: "actor_info",
+          required: false,
+          attributes: [
+            "id",
+            "name",
+            "email",
+            "phone_number",
+            "role",
+            "address_1",
+            "avatar",
+            "status",
+          ],
+        },
+      ],
+    });
+
+    return res.status(200).json({
+      RM: "Thông tin bộ phận!",
+      RC: 200,
+      RD: { stafflist, department_list },
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+
+const getstaff = (db) => async (req, res) => {
+  try {
+    const { company_id } = req.user;
+
+    if (!company_id) {
+      return res.status(200).json({
+        RM: "missing paramater!",
+        RC: 203,
+      });
+    }
+    const department_list = await db.Department.findAll({
+      where: {
+        Company_id: company_id,
+        active: true,
+      },
+    });
+    const stafflist = await db.ProductionStaff.findAll({
+      where: {
+        Company_id: company_id,
+      },
+      include: [
+        {
+          model: db.Department,
+          as: "department",
+        },
+        {
+          model: db.Actor_model,
+          as: "actor_info",
+          required: false,
+          attributes: [
+            "id",
+            "name",
+            "email",
+            "phone_number",
+            "role",
+            "address_1",
+            "avatar",
+            "status",
+          ],
+        },
+      ],
+    });
+
+    return res.status(200).json({
+      RM: "Thông tin bộ phận!",
+      RC: 200,
+      RD: { stafflist, department_list },
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+
+const createProductionStaff = (db) => async (req, res) => {
+  const t = await db.sequelize.transaction();
+  try {
+    const { company_id, role } = req.user;
+
+    const {
+      name,
+      email,
+      phone_number,
+      CCCD,
+      banking_code,
+      staff_role,
+      banking_brand,
+      status,
+      hasAccount,
+      level,
+      ltpCode,
+      password,
+      address_1,
+    } = req.body.form;
+
+    const missingFields = [];
+    if (!company_id) missingFields.push("ID Công ty");
+    if (!name) missingFields.push("Họ tên");
+    if (!email) missingFields.push("Email");
+    if (!phone_number) missingFields.push("Số điện thoại");
+    if (!address_1) missingFields.push("Địa chỉ");
+    if (!CCCD) missingFields.push("CCCD");
+
+    if (missingFields.length > 0) {
+      await t.rollback();
+      return res.status(200).json({
+        RM: `Thiếu thông tin bắt buộc: ${missingFields.join(", ")}`,
+        RC: 2203,
+      });
+    }
+
+    let staffId;
+    do {
+      staffId = Helper__funtion.genId("PRODUCTION_");
+    } while (
+      await Helper__funtion.validCheckID(staffId, db.ProductionStaff, "id")
+    );
+
+    if (hasAccount) {
+      if (!ltpCode || !password || !role) {
+        await t.rollback();
+        return res
+          .status(200)
+          .json({ RM: "Thiếu thông tin tài khoản!", RC: 203 });
+      }
+
+      const existingUser = await db.Actor_model.findOne({
+        where: { [Op.or]: [{ email }, { phone_number: phone_number }] },
+        transaction: t,
+      });
+
+      if (existingUser) {
+        await t.rollback();
+        return res
+          .status(200)
+          .json({ RM: "Email hoặc số điện thoại đã tồn tại!", RC: 204 });
+      }
+
+      const privateKey = crypto
+        .createHash("sha256")
+        .update(ltpCode)
+        .digest("hex");
+      const keyPair = EC.keyFromPrivate(privateKey);
+      const publicKey = keyPair.getPublic("hex");
+
+      const newUser = await db.Actor_model.create(
+        {
+          id: staffId,
+          name,
+          email,
+          address_1,
+          public_key: publicKey,
+          personal_tax_code: CCCD,
+          role: role,
+          role_active: "active",
+          phone_number: phone_number,
+          password: await bcrypt.hash(password, 10),
+          status: "pending",
+        },
+        { transaction: t },
+      );
+
+      let CALevel;
+      do {
+        CALevel = Helper__funtion.genId("PRODUCTION_");
+      } while (
+        await Helper__funtion.validCheckID(
+          CALevel,
+          db.Company_account_level,
+          "id",
+        )
+      );
+      await db.Company_account_level.create(
+        {
+          id: CALevel,
+          Actor_id: newUser.id,
+          Company_id: company_id,
+          level: level,
+        },
+        { transaction: t },
+      );
+
+      await db.ProductionStaff.create(
+        {
+          id: staffId,
+          name,
+          email,
+          Company_id: company_id,
+          role: staff_role,
+          phonenumber: phone_number,
+          address: address_1,
+          CCCD,
+          banking_code,
+          banking_brand,
+          status: "pending",
+        },
+        { transaction: t },
+      );
+
+      const auto_approve = await db.System_Settings.findOne({
+        where: { key: "auto_approve_user" },
+        transaction: t,
+      });
+
+      if (auto_approve && auto_approve.value === "true") {
+        const result = await pair_validate.process_user_block(
+          db,
+          nodes,
+          pendingRequests,
+        )(newUser.id);
+        if (result.ok) {
+          await newUser.update({ status: "active" }, { transaction: t });
+        }
+      }
+    }
+
+    await t.commit();
+    return res.status(200).json({ RM: "Thêm nhân viên thành công!", RC: 200 });
+  } catch (error) {
+    await t.rollback();
+    console.error(error);
+    return res.status(500).json({ RM: "Internal server error!", RC: 500 });
+  }
+};
+
+const createTechnicaltaff = (db) => async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const {
+      name,
+      email,
+      phonenumber,
+      address,
+      CCCD,
+      banking_code,
+      banking_brand,
+      status,
+    } = req.body.form;
+
+    if (
+      !company_id ||
+      !name ||
+      !email ||
+      !phonenumber ||
+      !address ||
+      !CCCD ||
+      !banking_brand ||
+      !banking_code
+    ) {
+      return res.status(200).json({
+        RM: "missing paramater!",
+        RC: 203,
+      });
+    }
+
+    let staffId;
+    do {
+      staffId = Helper__funtion.genId("TECHNICAL_");
+    } while (
+      await Helper__funtion.validCheckID(staffId, db.ProductionStaff, "id")
+    );
+    await db.ProductionStaff.create({
+      id: staffId,
+      name,
+      email,
+      role: "technical",
+      phonenumber,
+      Company_id: company_id,
+      address,
+      CCCD,
+      banking_code,
+      banking_brand,
+      status,
+    });
+
+    return res.status(200).json({
+      RM: "Thêm nhân viên thành công!",
+      RC: 200,
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+const changestaffpartment = (db) => async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const { staff_id } = req.params;
+    const { partmentid } = req.body;
+
+    if (!company_id || !staff_id || !partmentid) {
+      return res.status(200).json({
+        RM: "missing paramater!",
+        RC: 203,
+      });
+    }
+    const staff = await db.ProductionStaff.findByPk(staff_id);
+    const leaderDepartment = await db.Department.findOne({
+      where: {
+        leader_id: staff.id,
+        Company_id: company_id,
+      },
+    });
+
+    if (leaderDepartment) {
+      return res.status(400).json({
+        RM: "Không thể thay đổi bộ phận vì nhân viên đang là leader!",
+        RC: 205,
+      });
+    }
+
+    const partment = await db.Department.findByPk(partmentid);
+
+    if (!partment) {
+      return res.status(400).json({
+        RM: "không tìm thấy bộ phận mục tiêu!",
+        RC: 404,
+      });
+    }
+
+    if (!staff) {
+      return res.status(400).json({
+        RM: "không tìm thấy bộ phận!",
+        RC: 404,
+      });
+    }
+
+    if (!staff) {
+      return res.status(400).json({
+        RM: "không tìm thấy nhân viên!",
+        RC: 203,
+      });
+    }
+
+    await staff.update({
+      department_id: partmentid,
+    });
+
+    return res.status(200).json({
+      RM: "Thay đổi bộ phận thành công!",
+      RC: 200,
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+
+const uploadstaffcard = (db) => async (req, res) => {
+  try {
+    const STAFF_CARD_DIR = path.join(process.cwd(), process.env.STAFF_CARD_URL);
+    const { staff_id } = req?.params;
+
+    if (!staff_id) {
+      meta_core_controller.cleanupUploadedFiles(filecard);
+      return res.status(400).json({
+        RM: "Lỗi thêm ảnh, thiếu dữ liệu!",
+        RC: 203,
+      });
+    }
+    const filecard = req.files?.staff_card;
+
+    if (!filecard || filecard.length === 0) {
+      meta_core_controller.cleanupUploadedFiles(filecard);
+      return res.status(400).json({
+        RM: "Lỗi thêm ảnh, thiếu file!",
+        RC: 203,
+      });
+    }
+
+    const file = filecard[0];
+    const staff = await db.ProductionStaff.findByPk(staff_id);
+
+    if (!staff) {
+      meta_core_controller.cleanupUploadedFiles(filecard);
+      return res.status(400).json({
+        RM: "Lỗi thêm ảnh, không tìm thấy người dùng!",
+        RC: 203,
+      });
+    }
+
+    if (staff.actor_id) {
+      const actor = await db.Actor_model.findByPk(staff.actor_id);
+      if (!actor) {
+        meta_core_controller.cleanupUploadedFiles(filecard);
+        return res.status(400).json({
+          RM: "Lỗi thêm ảnh, không tìm thấy người dùng!",
+          RC: 203,
+        });
+      }
+
+      actor.avatar = file.filename;
+      await actor.save();
+
+      return res.status(200).json({
+        RC: 200,
+        RM: "Upload thành công",
+        RD: {
+          filename: file.filename,
+          path: file.path,
+        },
+      });
+    }
+    if (staff.avatar) {
+      Helper__funtion.removeOldAvatar(staff.avatar, STAFF_CARD_DIR);
+    }
+
+    await staff.update({
+      avatar: file.filename,
+    });
+
+    return res.status(200).json({
+      RC: 200,
+      RM: "Upload thành công",
+      RD: {
+        filename: file.filename,
+        path: file.path,
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    const filecard = req.files?.staff_card;
+    meta_core_controller.cleanupUploadedFiles(filecard);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+
+const newLeaderDepartment = (db) => async (req, res) => {
+  try {
+    const { company_id } = req.user;
+    const { department_id } = req.params;
+    const { staff_id } = req.body;
+
+    if (!company_id || !staff_id || !department_id) {
+      return res.status(200).json({
+        RM: "missing paramater!",
+        RC: 203,
+      });
+    }
+
+    const staff = await db.ProductionStaff.findByPk(staff_id);
+
+    if (!staff) {
+      return res.status(400).json({
+        RM: "không tìm thấy nhân viên!",
+        RC: 203,
+      });
+    }
+
+    const department = await db.Department.findByPk(department_id);
+    if (!department) {
+      return res.status(400).json({
+        RM: "không tìm thấy bộ phận!",
+        RC: 203,
+      });
+    }
+
+    if (!staff.department_id) {
+      await staff.update({
+        department_id,
+      });
+      await department.update({
+        leader_id: staff.id,
+      });
+    } else {
+      if (staff.department_id !== department_id) {
+        return res.status(400).json({
+          RM: "Nhân viên không thuộc bộ phận này!",
+          RC: 205,
+        });
+      }
+
+      await department.update({
+        leader_id: staff.id,
+      });
+    }
+
+    return res.status(200).json({
+      RM: "Thay đổi leader thành công!",
+      RC: 200,
+    });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return res.status(500).json({
+      RM: "Internal server error!",
+      RC: 500,
+    });
+  }
+};
+const user_edit_profile = (db) => async (req, res) => {
+  const t = await db.sequelize.transaction();
+  try {
+    const { id } = req.user;
+    const { name, phone_number, personal_tax_code, address_1, address_2 } =
+      req.body.formData;
+
+    const user = await db.Actor_model.findByPk(id, { transaction: t });
+    if (!user) {
+      await t.rollback();
+      return res.status(404).json({ RC: 404, RM: "Người dùng không tồn tại!" });
+    }
+    const updatedData = {
+      name: name || user.name,
+      phone_number: phone_number || user.phone_number,
+      personal_tax_code:
+        personal_tax_code !== undefined
+          ? personal_tax_code
+          : user.personal_tax_code,
+      address_1: address_1 !== undefined ? address_1 : user.address_1,
+      address_2: address_2 !== undefined ? address_2 : user.address_2,
+    };
+
+    console.log(updatedData);
+
+    await user.update(updatedData, { transaction: t });
+
+    await t.commit();
+    return res.status(200).json({
+      RC: 200,
+      RM: "Cập nhật thông tin thành công!",
+      RD: updatedData,
+    });
+  } catch (error) {
+    if (t) await t.rollback();
+    console.error("Update Profile Error:", error);
+    return res.status(500).json({
+      RC: 500,
+      RM: "Lỗi hệ thống khi cập nhật hồ sơ!",
+    });
+  }
+};
+
+const CompanyProfile = (db) => async (req, res) => {
+  try {
+    const { company_id, id, role } = req?.user || {};
+
+    if (!company_id || !id || !role) {
+      return res.status(400).json({
+        RM: "Thiếu thông tin định danh hoặc vai trò người dùng!",
+        RC: -203,
+      });
+    }
+    const ROLE_MAP = {
+      manufacturer: "Manufacturer",
+      distributor: "Distributor",
+      retailer: "Retailer",
+      transporter: "Transporter",
+    };
+
+    const modelName = ROLE_MAP[role.toLowerCase()];
+
+    if (!modelName || !db[modelName]) {
+      return res.status(404).json({
+        RM: "Loại hình doanh nghiệp không hợp lệ!",
+        RC: -404,
+      });
+    }
+
+    const company_info = await db[modelName].findByPk(company_id);
+
+    if (!company_info) {
+      return res.status(404).json({
+        RM: "Không tìm thấy thông tin doanh nghiệp!",
+        RC: -404,
+      });
+    }
+
+    return res.status(200).json({
+      RM: "Lấy thông tin doanh nghiệp thành công!",
+      RC: 200,
+      RD: company_info,
+    });
+  } catch (error) {
+    console.error("Fetch Company Profile Error:", error);
+    return res.status(500).json({
+      RM: "Lỗi hệ thống khi tải hồ sơ doanh nghiệp!",
+      RC: 500,
+    });
+  }
+};
+
+const editCompany = (db) => async (req, res) => {
+  try {
+    const { company_id, role } = req?.user || {};
+
+    const LOGO_DIR = path.join(
+      process.cwd(),
+      process.env.COMPANY_LOGO_URL || "public/images/company",
+    );
+
+    if (!company_id || !role) {
+      if (req.files?.logo)
+        meta_core_controller.cleanupUploadedFiles(req.files.logo);
+      return res.status(400).json({
+        RM: "Thiếu thông tin định danh người dùng!",
+        RC: -203,
+      });
+    }
+
+    const ROLE_MAP = {
+      manufacturer: "Manufacturer",
+      distributor: "Distributor",
+      retailer: "Retailer",
+      transporter: "Transporter",
+    };
+
+    const modelName = ROLE_MAP[role.toLowerCase()];
+    if (!modelName || !db[modelName]) {
+      if (req.files?.logo)
+        meta_core_controller.cleanupUploadedFiles(req.files.logo);
+      return res
+        .status(404)
+        .json({ RM: "Loại hình doanh nghiệp không hợp lệ!", RC: -404 });
+    }
+
+    const updateData = { ...req.body };
+    const logoFile = req.file ? req.file : null;
+
+    const company = await db[modelName].findByPk(company_id);
+    if (!company) {
+      if (logoFile) meta_core_controller.cleanupUploadedFiles(req.files.logo);
+      return res
+        .status(404)
+        .json({ RM: "Không tìm thấy doanh nghiệp!", RC: -404 });
+    }
+    if (logoFile) {
+      if (company.logo) {
+        Helper__funtion.removeOldAvatar(company.logo, LOGO_DIR);
+      }
+      updateData.logo = logoFile.filename;
+    }
+
+    await company.update(updateData);
+
+    return res.status(200).json({
+      RC: 200,
+      RM: "Cập nhật thông tin doanh nghiệp thành công!",
+      RD: company,
+    });
+  } catch (error) {
+    console.error("Edit Company Error:", error);
+    if (req.files?.logo)
+      meta_core_controller.cleanupUploadedFiles(req.files.logo);
+    return res.status(500).json({
+      RM: "Lỗi hệ thống khi cập nhật hồ sơ!",
+      RC: 500,
+    });
+  }
+};
+
+const get_batch_detail = (db) => async (req, res) => {
+  try {
+    const { batch_id } = req.params;
+    const { company_id } = req.user;
+
+    if (!batch_id || !company_id) {
+      return res
+        .status(400)
+        .json({ RM: "Thiếu thông tin định danh!", RC: -203 });
+    }
+
+    const batch = await db.product_batch.findOne({
+      where: { id: batch_id },
+      include: [
+        {
+          model: db.Product,
+          as: "product",
+          attributes: ["name", "main_cardimage"],
+        },
+        { model: db.Department, as: "Department", attributes: ["partname"] },
+      ],
+    });
+
+    if (!batch) {
+      return res.status(404).json({ RM: "Không tìm thấy lô hàng!", RC: 404 });
+    }
+
+    if (batch.author !== company_id) {
+      const isPartner = await db.Company_Collaboration.findOne({
+        where: {
+          status: "official",
+          [Op.or]: [
+            {
+              [Op.and]: [
+                { sender_id: company_id },
+                { receiver_id: batch.author },
+              ],
+            },
+            {
+              [Op.and]: [
+                { sender_id: batch.author },
+                { receiver_id: company_id },
+              ],
+            },
+          ],
+        },
+      });
+
+      if (!isPartner) {
+        return res.status(403).json({
+          RM: "Bạn không có quyền xem thông tin lô hàng này!",
+          RC: 403,
+        });
+      }
+    }
+
+    return res.status(200).json({
+      RC: 200,
+      RM: "Lấy thông tin lô hàng thành công",
+      RD: batch,
+    });
+  } catch (error) {
+    console.error("Get Batch Detail Error:", error);
+    return res.status(500).json({ RM: "Lỗi hệ thống!", RC: 500 });
+  }
+};
+
+const getValidVehicle = (db) => async (req, res) => {
+  try {
+    const { company_id } = req?.user;
+    if (!company_id) {
+      return res
+        .status(400)
+        .json({ RM: "Thiếu thông tin định danh!", RC: -203 });
+    }
+
+    const vehicles = await db.Vehicle.findAll({
+      where: {
+        owner_id: company_id,
+        order_now: "none",
+        driver_id: {
+          [Op.ne]: null,
+        },
+      },
+    });
+
+    return res.status(200).json({
+      RC: 200,
+      RM: "Lấy thông tin xe thành công",
+      RD: vehicles,
+    });
+  } catch (error) {
+    console.error("Get Batch Detail Error:", error);
+    return res.status(500).json({ RM: "Lỗi hệ thống!", RC: 500 });
+  }
+};
+
+const createQRBatch = (db) => async (req, res) => {
+  const transaction = await db.sequelize.transaction();
+  try {
+    const { company_id, id } = req?.user;
+    const { target_id } = req?.body;
+    if (!company_id || !target_id) {
+      return res
+        .status(400)
+        .json({ RM: "Thiếu thông tin định danh!", RC: -203 });
+    }
+
+    const batch = await db.product_batch.findByPk(target_id);
+
+    if (!batch) {
+      return res.status(404).json({ RM: "Không tìm thấy lô hàng!", RC: 404 });
+    }
+
+    if (batch.author !== company_id) {
+      return res.status(403).json({
+        RM: "Bạn không có quyền tạo QR cho lô hàng này!",
+        RC: 403,
+      });
+    }
+
+    if (batch.total_box <= 0) {
+      return res.status(400).json({
+        RM: "Lô hàng không có số lượng thùng hợp lệ để tạo QR!",
+        RC: 400,
+      });
+    }
+    const qrEntries = [];
+    for (let i = 0; i < (batch.total_box || 1); i++) {
+      const secure_token = crypto.randomBytes(16).toString("hex");
+
+      qrEntries.push({
+        id: `QR_${Date.now()}_${i}`,
+        Author: company_id,
+        Actor_created: id,
+        target_id: batch.id,
+        target_type: "BATCH",
+        secure_token: secure_token,
+        print_status: "pending",
+        status: "pending",
+        blockchain_proof: `BOX_INDEX_${i + 1}`,
+      });
+    }
+
+    await db.QrRegistry.bulkCreate(qrEntries, { transaction });
+    await transaction.commit();
+    return res.status(200).json({
+      RM: "Tạo mã QR cho lô hàng thành công!",
+      RC: 200,
+    });
+  } catch (error) {
+    console.error("Create QR Batch Error:", error);
+    if (transaction) await transaction.rollback();
+    return res.status(500).json({ RM: "Lỗi hệ thống!", RC: 500 });
+  }
+};
+
+const printedQRBatch = (db) => async (req, res) => {
+  const transaction = await db.sequelize.transaction();
+
+  try {
+    const { company_id, id: user_id } = req?.user;
+    const { Qrids } = req?.body;
+
+    if (!company_id || !Qrids || !Array.isArray(Qrids) || Qrids.length === 0) {
+      return res
+        .status(400)
+        .json({ RM: "Dữ liệu đầu vào không hợp lệ!", RC: -203 });
+    }
+
+    const qrs = await db.QrRegistry.findAll({
+      where: {
+        id: { [Op.in]: Qrids },
+        Author: company_id,
+      },
+      transaction,
+    });
+
+    if (qrs.length !== Qrids.length) {
+      await transaction.rollback();
+      return res.status(404).json({
+        RM: "Phát hiện mã QR không hợp lệ hoặc không thuộc quyền quản lý của bạn!",
+        RC: 404,
+      });
+    }
+
+    await db.QrRegistry.update(
+      {
+        print_status: "printed",
+        print_count: db.sequelize.literal("print_count + 1"),
+      },
+      {
+        where: { id: { [Op.in]: Qrids } },
+        transaction,
+      },
+    );
+
+    await transaction.commit();
+
+    return res.status(200).json({
+      RM: `Đã xác nhận in thành công ${Qrids.length} nhãn định danh!`,
+      RC: 200,
+    });
+  } catch (error) {
+    if (transaction) await transaction.rollback();
+    console.error("Print QR Batch Professional Error:", error);
+    return res
+      .status(500)
+      .json({ RM: "Lỗi hệ thống khi chốt lệnh in!", RC: 500 });
+  }
+};
+
 export default {
+  getValidVehicle,
+  printedQRBatch,
+  createQRBatch,
+  user_edit_profile,
+  editCompany,
+  get_batch_detail,
+  CompanyProfile,
+  newLeaderDepartment,
+  getProductionstaff,
+  uploadstaffcard,
+  changestaffpartment,
+  createTechnicaltaff,
+  getTechnicaltaff,
+  createProductionStaff,
+  editDepartment,
+  createDepartment,
   dropUserBlock,
+  getDepartment,
+  changeActiveCate,
   createRawProduct,
   getMe,
   user_setup_login,
@@ -1833,9 +3236,11 @@ export default {
   verifyAdminOTP,
   create_pending_profile,
   userLogin,
+  getstaff,
   userLogout,
   mailResendPendingUser,
   getAllSettings,
   updateSetting,
+  QR_batchverify,
   createSetting,
 };

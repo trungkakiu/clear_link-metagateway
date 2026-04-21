@@ -31,8 +31,28 @@ export default (sequelize, DataTypes) => {
         allowNull: false,
       },
       type: {
-        type: DataTypes.STRING,
+        type: DataTypes.ENUM(
+          "general",
+          "electronics",
+          "food_beverage",
+          "chemicals",
+          "garment",
+          "medical",
+          "construction",
+        ),
+        defaultValue: "general",
         allowNull: true,
+      },
+      weight: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0,
+        allowNull: false,
+      },
+
+      weight_type: {
+        type: DataTypes.ENUM("kilogam", "gam", "ton"),
+        defaultValue: "kilogam",
+        allowNull: false,
       },
       status: {
         type: DataTypes.ENUM(
@@ -49,6 +69,14 @@ export default (sequelize, DataTypes) => {
         ),
         allowNull: false,
       },
+      OEM: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+      },
+      OEMfile: {
+        type: DataTypes.STRING,
+      },
+
       chain_status: {
         type: DataTypes.ENUM(
           "active",
@@ -86,7 +114,7 @@ export default (sequelize, DataTypes) => {
     Product.belongsTo(models.Manufacturer, {
       foreignKey: "author",
       targetKey: "id",
-      as: "manufacturer",
+      as: "manufacturer_info",
       onDelete: "CASCADE",
       onUpdate: "CASCADE",
     });
@@ -95,6 +123,15 @@ export default (sequelize, DataTypes) => {
       as: "batches",
       onDelete: "CASCADE",
       onUpdate: "CASCADE",
+    });
+
+    Product.hasMany(models.Item_image, {
+      foreignKey: "owner_id",
+      as: "sub_images",
+      scope: {
+        image_type: "product",
+      },
+      constraints: false,
     });
 
     Product.belongsTo(models.Actor_model, {

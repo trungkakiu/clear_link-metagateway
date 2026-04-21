@@ -19,3 +19,5 @@ docker/**/auto.cnf
 # OS
 .DS_Store
 Thumbs.db
+
+src/auth/testggfb-bde24-firebase-adminsdk-fbsvc-e4767d08cd.json

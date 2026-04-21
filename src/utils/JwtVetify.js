@@ -60,8 +60,22 @@ const verifyToken = (db) => async (req, res, next) => {
         token,
         process.env.JWT_SECRET || "supersecretkey12doto3",
       );
+      const User = await db.Actor_model.findByPk(decoded.id);
+      if (!User) {
+        return res.status(403).json({
+          RM: "Người dùng không hợp lệ!",
+          EC: -403,
+        });
+      }
+      if (decoded.session_id !== User.Session_id) {
+        return res.status(403).json({
+          RM: "Tài khoản đang được đăng nhập trên thiết bị khác!",
+          EC: -403,
+        });
+      }
+
       req.user = decoded;
-      next();
+      return next();
     } catch (err) {
       console.error("Token verification error:", err);
       return res.status(403).json({
@@ -78,18 +92,55 @@ const verifyToken = (db) => async (req, res, next) => {
   }
 };
 
-const isAdmin = () => (req, res, next) => {
-  const user = req.user;
-  console.log("user: ", user);
+const isPrime = () => (req, res, next) => {
+  try {
+    console.log("CALL IS PRIME");
+    if (!req.user) {
+      return res.status(401).json({
+        RM: "Chưa xác thực",
+        EC: -401,
+      });
+    }
 
-  if (req.user?.role !== "admin") {
-    return res.status(403).json({
-      RM: " Bạn không có quyền truy cập vào tài nguyên này.",
-      EC: -403,
-      ED: "",
+    const prime = req.user.prime === true;
+
+    if (!prime) {
+      console.warn(`USER [${req.user.id}] TRYING CONTROL ADMIN DASHBOARD`);
+      return res.status(403).json({
+        RM: "Không đủ thẩm quyền",
+        EC: -403,
+      });
+    }
+
+    next();
+  } catch (error) {
+    console.error("isPrime error:", error);
+    return res.status(500).json({
+      RM: "Lỗi hệ thống",
+      EC: -500,
     });
   }
-  next();
+};
+
+const isAdmin = () => (req, res, next) => {
+  try {
+    const user = req?.user;
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({
+        RM: "Bạn không có quyền truy cập vào tài nguyên này.",
+        EC: -403,
+        ED: "",
+      });
+    }
+
+    next();
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      RM: "Lỗi hệ thống.",
+      EC: 500,
+    });
+  }
 };
 
 const RequireOTP = (db) => async (req, res, next) => {
@@ -143,4 +194,11 @@ const RequireOTP = (db) => async (req, res, next) => {
   }
 };
 
-export default { verifyToken, isAdmin, scriptProtect, limiter, RequireOTP };
+export default {
+  verifyToken,
+  isAdmin,
+  scriptProtect,
+  limiter,
+  RequireOTP,
+  isPrime,
+};

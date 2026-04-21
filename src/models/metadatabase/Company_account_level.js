@@ -20,13 +20,13 @@ export default (sequelize, DataTypes) => {
           "level_2",
           "level_3",
           "level_4",
-          "level_5"
+          "level_5",
         ),
         defaultValue: "level_1",
       },
       status: {
-        type: DataTypes.ENUM("active", "down", "ban"),
-        defaultValue: "active",
+        type: DataTypes.ENUM("pending", "active", "down", "ban"),
+        defaultValue: "pending",
       },
       isExcute: {
         type: DataTypes.BOOLEAN,
@@ -36,21 +36,25 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.BOOLEAN,
         defaultValue: true,
       },
+      Department: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
     },
     {
       tableName: "Company_account_level",
       timestamps: true,
       underscored: false,
-    }
+    },
   );
 
   Company_account_level.associate = (models) => {
     Company_account_level.belongsTo(models.Actor_model, {
       foreignKey: "Actor_id",
-      sourceKey: "id",
+      targetKey: "id",
       as: "owner_id",
       onDelete: "CASCADE",
-      onUpdate: "CASCADE",
+      onUpdate: "CASCADE",  
     });
   };
 

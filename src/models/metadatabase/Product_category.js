@@ -23,12 +23,16 @@ export default (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: "available",
       },
+      active: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: true,
+      },
     },
     {
       tableName: "Product_category",
       timestamps: true,
       underscored: false,
-    }
+    },
   );
 
   Product_category.associate = (models) => {

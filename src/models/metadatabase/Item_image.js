@@ -16,16 +16,18 @@ export default (sequelize, DataTypes) => {
           "manufacturer",
           "retailer",
           "vehicle",
-          "transporter"
+          "transporter",
         ),
         allowNull: false,
       },
-
+      parent_id: {
+        type: DataTypes.STRING,
+        allowNull: false,
+      },
       owner_id: {
         type: DataTypes.STRING,
         allowNull: false,
       },
-
       url: DataTypes.STRING,
       img_des: DataTypes.STRING,
       index: DataTypes.INTEGER,
@@ -38,10 +40,21 @@ export default (sequelize, DataTypes) => {
     {
       tableName: "Item_image",
       timestamps: true,
-    }
+    },
   );
 
-  Item_image.associate = () => {};
+  Item_image.associate = (models) => {
+    Item_image.belongsTo(models.Vehicle, {
+      foreignKey: "owner_id",
+      constraints: false,
+      as: "vehicle",
+    });
+    Item_image.belongsTo(models.Product, {
+      foreignKey: "owner_id",
+      constraints: false,
+      as: "Product",
+    });
+  };
 
   return Item_image;
 };

@@ -3,45 +3,22 @@ export default (sequelize, DataTypes) => {
     "Fleet_Vehicle",
     {
       id: {
-        type: DataTypes.STRING,
+        type: DataTypes.INTEGER,
         primaryKey: true,
+        autoIncrement: true, // Để tự động tăng cho khỏe anh ạ
       },
-      fleet_id: {
-        type: DataTypes.STRING,
-        allowNull: false,
-      },
-      vehicle_id: {
-        type: DataTypes.STRING,
-        allowNull: false,
-      },
-      assigned_date: {
-        type: DataTypes.DATE,
-        allowNull: false,
-      },
-      released_date: {
-        type: DataTypes.DATE,
-        allowNull: true,
-      },
+      fleet_id: { type: DataTypes.STRING, allowNull: false },
+      vehicle_id: { type: DataTypes.STRING, allowNull: false },
+      assigned_date: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
+      released_date: { type: DataTypes.DATE, allowNull: true },
       status: {
         type: DataTypes.ENUM("active", "inactive"),
-        allowNull: false,
+        defaultValue: "active",
       },
-      note: {
-        type: DataTypes.STRING,
-        allowNull: true,
-      },
+      note: { type: DataTypes.STRING, allowNull: true },
     },
-    {
-      tableName: "Fleet_Vehicle",
-      timestamps: true,
-      underscored: false,
-    }
+    { tableName: "Fleet_Vehicle", timestamps: true },
   );
-
-  Fleet_Vehicle.associate = (models) => {
-    Fleet_Vehicle.belongsTo(models.Fleet, { foreignKey: "fleet_id" });
-    Fleet_Vehicle.belongsTo(models.Vehicle, { foreignKey: "vehicle_id" });
-  };
 
   return Fleet_Vehicle;
 };

@@ -1,9 +1,91 @@
 import meta_ws_controller from "./src/core/metadata_core/meta_ws_controller.js";
+import cron from "node-cron";
+import { Op } from "sequelize";
 
 let running_ATOAPP = false;
 let running_ATOAPU = false;
 let running_ATOGGN = false;
+let running_ATOAPC = false;
 let running_ATORMP = false;
+let running_ATOACT = false;
+let running_ATOAPB = false;
+let running_ATOASO = false;
+
+async function loop_ATOASO(db, nodes) {
+  if (running_ATOASO) return;
+  running_ATOASO = true;
+
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOASO" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return;
+    }
+
+    await meta_ws_controller.Auto_pair_shipingorder(db, nodes);
+
+    const delay = Number(settings.value) || 15000;
+    setTimeout(() => loop_ATOASO(db, nodes), delay);
+  } catch (err) {
+    console.error("[running_ATOASO]", err);
+    setTimeout(() => loop_ATOASO(db, nodes), 5000);
+  } finally {
+    running_ATOASO = false;
+  }
+}
+
+async function loop_ATOAPB(db, nodes) {
+  if (running_ATOAPB) return;
+  running_ATOAPB = true;
+
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOAPB" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return;
+    }
+
+    await meta_ws_controller.Auto_pair_batched(db, nodes);
+
+    const delay = Number(settings.value) || 15000;
+    setTimeout(() => loop_ATOAPB(db, nodes), delay);
+  } catch (err) {
+    console.error("[loop_ATOAPB]", err);
+    setTimeout(() => loop_ATOAPB(db, nodes), 5000);
+  } finally {
+    running_ATOAPB = false;
+  }
+}
+
+async function loop_ATOACT(db, nodes) {
+  if (running_ATOACT) return;
+  running_ATOACT = true;
+
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOACT" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return;
+    }
+
+    await meta_ws_controller.auto_pair_contract(db, nodes);
+
+    const delay = Number(settings.value) || 15000;
+    setTimeout(() => loop_ATOACT(db, nodes), delay);
+  } catch (err) {
+    console.error("[ATOAPP]", err);
+    setTimeout(() => loop_ATOACT(db, nodes), 5000);
+  } finally {
+    running_ATOACT = false;
+  }
+}
+
 async function loop_ATOAPP(db, nodes) {
   if (running_ATOAPP) return;
   running_ATOAPP = true;
@@ -29,10 +111,35 @@ async function loop_ATOAPP(db, nodes) {
   }
 }
 
+async function loop_ATOAPC(db, nodes) {
+  if (running_ATOAPC) return;
+  running_ATOAPC = true;
+
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOAPC" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return;
+    }
+
+    await meta_ws_controller.auto_pair_company(db, nodes);
+
+    const delay = Number(settings.value) || 15000;
+    setTimeout(() => loop_ATOAPC(db, nodes), delay);
+  } catch (err) {
+    console.error("[ATOAPC]", err);
+    setTimeout(() => loop_ATOAPC(db, nodes), 5000);
+  } finally {
+    running_ATOAPC = false;
+  }
+}
+
 async function loop_ATOAPU(db, nodes) {
   if (running_ATOAPU) return;
   running_ATOAPU = true;
-  
+
   try {
     const settings = await db.System_Settings.findOne({
       where: { key: "ATOAPU" },
@@ -68,8 +175,9 @@ async function loop_ATOGGN(db, nodes) {
     }
 
     const res = await meta_ws_controller.get_global_node(db, nodes);
-    if (res.RC !== "200") {
-      console.log(res.RM);
+
+    if (res.RC !== 200) {
+      console.error(res.RM);
     }
 
     const delay = Number(settings.value) || 20000;
@@ -84,13 +192,10 @@ async function loop_ATOGGN(db, nodes) {
 
 async function loop_ATORMP(db, nodes) {
   if (running_ATORMP) {
-    console.warn("[ATORMP] SKIP – already running");
     return;
   }
 
   running_ATORMP = true;
-  console.log("[ATORMP] START round");
-
   try {
     const settings = await db.System_Settings.findOne({
       where: { key: "ATORMP" },
@@ -102,22 +207,16 @@ async function loop_ATORMP(db, nodes) {
       return;
     }
 
-    console.log("[ATORMP] CALL Drop_block");
-
     await meta_ws_controller.Drop_block(db, nodes);
 
     const delay = Number(settings.value) || 20000;
 
-    console.log("[ATORMP] SCHEDULE next round", delay);
-
     setTimeout(() => {
-      console.log("[ATORMP] NEXT round start");
       running_ATORMP = false;
       loop_ATORMP(db, nodes);
     }, delay);
   } catch (err) {
     console.error("[ATORMP] ERROR", err);
-
     setTimeout(() => {
       console.log("[ATORMP] RETRY round");
       running_ATORMP = false;
@@ -126,9 +225,41 @@ async function loop_ATORMP(db, nodes) {
   }
 }
 
+const initCronJobs = (db) => {
+  cron.schedule("0 0 * * *", async () => {
+    console.log(
+      "--- Đang chạy tác vụ cập nhật trạng thái Batch tự động (00:00) ---",
+    );
+
+    try {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const [updatedCount] = await db.product_batch.update(
+        { status: "in_progress" },
+        {
+          where: {
+            status: "pending",
+            manufacture_date: {
+              [Op.lte]: today,
+            },
+          },
+        },
+      );
+    } catch (error) {
+      console.error("Lỗi khi chạy Cron Job cập nhật Batch:", error);
+    }
+  });
+};
+
 export default {
   loop_ATOAPP,
+  loop_ATOAPB,
   loop_ATOAPU,
   loop_ATOGGN,
+  loop_ATOAPC,
   loop_ATORMP,
+  loop_ATOACT,
+  loop_ATOASO,
+  initCronJobs,
 };
