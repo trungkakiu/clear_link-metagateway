@@ -21,7 +21,7 @@ export default (sequelize, DataTypes) => {
           "active",
           "pending",
           "in_down_progess",
-          "donw",
+          "banding",
           "not_active",
         ),
       },
@@ -57,7 +57,6 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: true,
       },
-
       production_capacity: {
         type: DataTypes.INTEGER,
         allowNull: true,
@@ -81,6 +80,28 @@ export default (sequelize, DataTypes) => {
       chain_status: {
         type: DataTypes.ENUM("pending", "pairing", "not_pair", "active"),
         defaultValue: "pending",
+      },
+      AI_active: {
+        type: DataTypes.BOOLEAN,
+        defaultValue: false,
+        comment: "Bật/Tắt tính năng AI Anomaly Detection cho công ty này",
+      },
+      txt_hash: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "mã bảo chứng chain",
+      },
+      log_counter: {
+        type: DataTypes.INTEGER,
+        defaultValue: 0,
+        comment:
+          "Đếm số log tích lũy kể từ lần tính Baseline/Retrain cuối cùng",
+      },
+      training_threshold: {
+        type: DataTypes.INTEGER,
+        defaultValue: 5000,
+        comment:
+          "Ngưỡng số lượng logs để tự động kích hoạt Retrain (5000 hoặc 10000)",
       },
     },
     {

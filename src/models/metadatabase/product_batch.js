@@ -18,6 +18,12 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: false,
       },
+      product_metadata_id: {
+        type: DataTypes.UUID,
+        allowNull: false,
+        comment:
+          "Trỏ vào ID của Product_Metadata để lấy đúng giá và mô tả tại thời điểm tạo lô",
+      },
       author: {
         type: DataTypes.STRING,
         allowNull: true,
@@ -69,6 +75,11 @@ export default (sequelize, DataTypes) => {
         },
         onUpdate: "CASCADE",
         onDelete: "SET NULL",
+      },
+      Chain_status: {
+        type: DataTypes.ENUM("pending", "not_ready", "paring", "active"),
+        defaultValue: "not_ready",
+        allowNull: false,
       },
       status: {
         type: DataTypes.ENUM(
@@ -190,17 +201,28 @@ export default (sequelize, DataTypes) => {
       },
       payment_content: {
         type: DataTypes.STRING,
-        unique: true,
       },
       quantity: {
         type: DataTypes.INTEGER,
         allowNull: false,
+      },
+      txt_hash: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "mã bảo chứng chain",
       },
     },
     {
       tableName: "product_batch",
       timestamps: true,
       underscored: false,
+      indexes: [
+        {
+          unique: true,
+          name: "unique_payment_content",
+          fields: ["payment_content"],
+        },
+      ],
       hooks: {
         beforeSave: async (batch, options) => {
           await calculateTotalPrice(batch, sequelize.models);
@@ -262,6 +284,10 @@ export default (sequelize, DataTypes) => {
       onDelete: "CASCADE",
       onUpdate: "CASCADE",
     });
+    product_batch.belongsTo(models.Product_Metadata, {
+      foreignKey: "product_metadata_id",
+      as: "product_version",
+    });
     product_batch.belongsTo(models.Manufacturer, {
       foreignKey: "author",
       targetKey: "id",
@@ -289,10 +315,14 @@ async function calculateTotalPrice(batch, models) {
     const qcPass = parseInt(batch.QC_Pass) || 0;
     const quantity = parseInt(batch.quantity) || 0;
 
-    const product = await models.Product.findByPk(batch.product_id);
-    if (product && product.price) {
-      const unitPrice = parseFloat(product.price) || 0;
-      batch.total_price = unitPrice * qcPass;
+    if (batch.product_metadata_id) {
+      const productVersion = await models.Product_Metadata.findByPk(
+        batch.product_metadata_id,
+      );
+      if (productVersion && productVersion.price) {
+        const unitPrice = parseFloat(productVersion.price) || 0;
+        batch.total_price = unitPrice * qcPass;
+      }
     }
 
     if (batch.weight_per_unit) {

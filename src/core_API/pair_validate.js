@@ -57,7 +57,6 @@ const process_user_block = (db, nodes) => async (user) => {
       where: { key: "APPVS" },
     });
 
-    console.log("USER STATUS: ", user.status);
     if (user.status !== "pairing" || user.status == "active") {
       console.warn(`${TRACE} SKIP: user already processed`);
       return { ok: false, msg: "User already processed" };
@@ -75,12 +74,13 @@ const process_user_block = (db, nodes) => async (user) => {
     const user_hash = crypto.createHash("sha256").update(raw).digest("hex");
 
     const payload = {
-      timestamp: Date.now(),
+      timestamp: String(Date.now()),
       user: {
         id: user.id,
         hash: user_hash,
         version: version.description || "1.0.0",
         type: "create_user",
+        original_value: raw,
       },
     };
 
@@ -99,14 +99,6 @@ const process_user_block = (db, nodes) => async (user) => {
       nodes,
       "new",
     );
-
-    console.log(`${TRACE} VOTE RESULT:`, {
-      RC: vote_results?.RC,
-      quorum_pass: vote_results?.RD?.quorum_pass,
-      admin: vote_results?.RD?.admin,
-      client: vote_results?.RD?.client,
-      total: vote_results?.RD?.total,
-    });
 
     if (vote_results.RC !== 200) {
       console.warn(`${TRACE} ABORT: vote RPC failed`);
@@ -128,7 +120,7 @@ const process_user_block = (db, nodes) => async (user) => {
 
     const commitResp = await pair_request(db, payload, nodes, "pair_user");
 
-    if (commitResp.RC !== 200 || commitResp.RD.complate < quorum) {
+    if (commitResp.RC !== 200) {
       return {
         ok: false,
         msg: "Không đủ số node commit block.",
@@ -136,8 +128,6 @@ const process_user_block = (db, nodes) => async (user) => {
         commit: commitResp,
       };
     }
-
-    console.log(`${TRACE} SUCCESS`);
 
     return {
       ok: true,
@@ -189,6 +179,7 @@ const get_vote = async (
   type,
   status,
   nodes,
+  version,
   command_type,
 ) => {
   try {
@@ -268,6 +259,7 @@ const get_vote = async (
               Signature,
               Public_key: PUBLIC_KEY,
               current_id,
+              version: version,
               type,
               command_type,
               status,
@@ -337,7 +329,7 @@ const get_vote = async (
         },
         total: {
           online: total_online,
-          total: nodes.size, // Tổng số node đang quản lý
+          total: nodes.size,
           ratio: nodes.size > 0 ? total_online / nodes.size : 0,
         },
         vote_map,
@@ -351,85 +343,148 @@ const get_vote = async (
 
 const pair_request = async (db, payload, nodes, type) => {
   try {
+    console.log(
+      `[DEBUG] Bắt đầu pair_request. Tổng số kết nối WS đang có: ${nodes.size}`,
+    );
+
     const peer_map_list = {};
-    let complate = 0;
+    let completed = 0;
     let failed = 0;
+    const admin_responses = {};
+    const client_votes = {};
 
-    const admin_block = {};
-    let winner = null;
+    const activeNodeIds = Array.from(nodes.keys());
+    console.log(`[DEBUG] Danh sách Node ID từ WS:`, activeNodeIds);
 
-    const totalAdmin = await db.peer_map.findAll({
-      where: { node_type: "admin", health: "ok" },
+    const onlineNodesData = await db.peer_map.findAll({
+      where: {
+        id: { [db.Sequelize.Op.in]: activeNodeIds },
+        health: "ok",
+      },
     });
-    const quorum = Math.floor(totalAdmin.length / 2) + 1;
+
+    console.log(
+      `[DEBUG] Số lượng Node tìm thấy trong DB có trạng thái 'ok': ${onlineNodesData.length}`,
+    );
+
+    const onlineAdmins = onlineNodesData.filter((n) => n.node_type === "admin");
+    const onlineClients = onlineNodesData.filter(
+      (n) => n.node_type === "client",
+    );
+
+    console.log(
+      `[DEBUG] Quorum yêu cầu - Admin: ${onlineAdmins.length}, Client: ${onlineClients.length}`,
+    );
+
+    const adminQuorumRequired =
+      onlineAdmins.length > 0 ? Math.ceil((onlineAdmins.length * 2) / 3) : 1;
+    const clientQuorumRequired =
+      onlineClients.length > 0 ? Math.floor(onlineClients.length / 2) + 1 : 0;
+
     const tasks = [];
 
     for (const [nodeId, ws] of nodes) {
       const task = (async () => {
-        const nodeData = await db.peer_map.findByPk(nodeId);
-        if (!nodeData) {
-          peer_map_list[nodeId] = false;
+        const nodeInfo = onlineNodesData.find((n) => n.id === nodeId);
+
+        if (!nodeInfo) {
+          console.log(
+            `[DEBUG] Node ${nodeId} bị bỏ qua vì không tìm thấy thông tin khớp trong DB hoặc health không 'ok'`,
+          );
           return;
         }
 
-        if (nodeData.health != "ok") {
-          peer_map_list[nodeId] = false;
-          return;
-        }
+        console.log(
+          `[SENDING] Đang gửi lệnh '${type}' tới Node: ${nodeId} (${nodeInfo.node_type})`,
+        );
 
         const requestId = uuidv4();
         const waitResponse = Helper__funtion.waitRpc(requestId, 3000);
 
-        await ws.send(
-          JSON.stringify({
-            type: "command",
-            command: type,
-            sessionId: ws._session.sessionId,
-            requestId,
-            payload,
-            serverTime: Date.now(),
-          }),
-        );
+        try {
+          await ws.send(
+            JSON.stringify({
+              type: "command",
+              command: type,
+              sessionId: ws._session.sessionId,
+              requestId,
+              payload,
+              serverTime: Date.now(),
+            }),
+          );
 
-        const result = await waitResponse;
-        if (result.timeout) {
-          console.log("TIMEOUT PAIR REQUEST");
+          const result = await waitResponse;
+
+          // BƯỚC 1: LOG RAW DATA TRẢ VỀ ĐỂ NHÌN RÕ VẤN ĐỀ
+          console.log(`\n======================================`);
+          console.log(
+            `[DEBUG - RAW RESULT] Từ Node ${nodeId} (${nodeInfo.node_type}):`,
+          );
+          console.log(JSON.stringify(result, null, 2));
+          console.log(`======================================\n`);
+
+          // BƯỚC 2: TÁCH RIÊNG TỪNG TRƯỜNG HỢP LỖI
+          if (!result) {
+            console.log(
+              `[FAILED - TIMEOUT] Node ${nodeId} không phản hồi hoặc quá hạn 3s.`,
+            );
+            peer_map_list[nodeId] = false;
+            failed++;
+          } else if (result.error || result.ok === false) {
+            console.log(
+              `[FAILED - ERROR_RETURNED] Node ${nodeId} chủ động trả về lỗi: ${result.error || "N/A"}`,
+            );
+            peer_map_list[nodeId] = false;
+            failed++;
+          } else if (!result.block) {
+            console.log(
+              `[FAILED - MISSING_BLOCK] Node ${nodeId} phản hồi thành công nhưng KHÔNG CÓ object 'block' trong payload!`,
+            );
+            peer_map_list[nodeId] = false;
+            failed++;
+          } else if (result.block.ok !== true) {
+            console.log(
+              `[FAILED - BLOCK_NOT_OK] Node ${nodeId} có object 'block' nhưng biến ok !== true.`,
+            );
+            peer_map_list[nodeId] = false;
+            failed++;
+          } else {
+            console.log(
+              `[SUCCESS] Node ${nodeId} phản hồi thành công cấu trúc 'block'.`,
+            );
+            peer_map_list[nodeId] = true;
+            completed++;
+
+            const bHash = result.block.block_hash;
+            if (nodeInfo.node_type === "admin") {
+              admin_responses[nodeId] = result.block;
+            } else if (nodeInfo.node_type === "client") {
+              client_votes[bHash] = (client_votes[bHash] || 0) + 1;
+            }
+          }
+        } catch (e) {
+          console.log(
+            `[ERROR - EXCEPTION] Lỗi khi giao tiếp với Node ${nodeId}:`,
+            e.message,
+          );
           peer_map_list[nodeId] = false;
           failed++;
-          return;
-        }
-
-        if (result.block.ok) {
-          peer_map_list[nodeId] = true;
-          complate++;
-        } else {
-          peer_map_list[nodeId] = false;
-          failed++;
-          console.log(nodeId, "failed");
-        }
-        if (result.block.type === "admin") {
-          admin_block[nodeId] = result.block;
         }
       })();
-
       tasks.push(task);
     }
 
     await Promise.allSettled(tasks);
-    const adminResults = Object.values(admin_block).filter(
+
+    const adminResults = Object.values(admin_responses).filter(
       (r) => r && r.block_hash && r.height && r.previous,
     );
 
     if (adminResults.length === 0) {
-      return {
-        RM: "No admin consensus result",
-        RC: 409,
-        RD: { failed, complate },
-      };
+      return { RM: "No admin responded", RC: 409, RD: { failed, completed } };
     }
 
     const consensusMap = {};
-
     for (const r of adminResults) {
       if (!consensusMap[r.block_hash]) {
         consensusMap[r.block_hash] = {
@@ -439,45 +494,43 @@ const pair_request = async (db, payload, nodes, type) => {
           validators: [],
         };
       }
-
       consensusMap[r.block_hash].count++;
       consensusMap[r.block_hash].validators.push(r.validator);
     }
 
+    let winner = null;
     for (const [hash, data] of Object.entries(consensusMap)) {
-      if (!winner) {
-        winner = { block_hash: hash, ...data };
-        continue;
-      }
-
-      if (data.count > winner.count) {
-        winner = { block_hash: hash, ...data };
-        continue;
-      }
-
-      if (data.count === winner.count && data.height > winner.height) {
+      if (
+        !winner ||
+        data.count > winner.count ||
+        (data.count === winner.count && data.height > winner.height)
+      ) {
         winner = { block_hash: hash, ...data };
       }
     }
 
-    if (winner.count < quorum) {
+    const currentClientVotes = client_votes[winner.block_hash] || 0;
+
+    const isAdminQuorumMet = winner.count >= adminQuorumRequired;
+    const isClientQuorumMet = currentClientVotes >= clientQuorumRequired;
+
+    if (!isAdminQuorumMet || !isClientQuorumMet) {
       await db.Global_Node.update(
         { network_status: "fork_risk" },
         { where: { id: 1 } },
       );
 
       return {
-        RM: "Consensus not reached (quorum failed)",
+        RM: `Consensus Failed: Admin(${winner.count}/${adminQuorumRequired}), Client(${currentClientVotes}/${clientQuorumRequired})`,
         RC: 409,
-        RD: { failed, complate },
+        RD: {
+          admin_votes: winner.count,
+          admin_required: adminQuorumRequired,
+          client_votes: currentClientVotes,
+          client_required: clientQuorumRequired,
+        },
       };
     }
-
-    console.log("[PAIR][META] updating global_node with:", {
-      height: winner.height,
-      hash: winner.block_hash,
-      validators: winner.validators,
-    });
 
     await db.Global_Node.update(
       {
@@ -491,14 +544,12 @@ const pair_request = async (db, payload, nodes, type) => {
       },
       { where: { id: 1 } },
     );
-
+    
     return {
-      RM: "pair item complete!",
+      RM: "Pair item complete with Dual Quorum!",
       RC: 200,
       RD: {
-        failed,
-        complate,
-        peer_map_list,
+        completed,
         consensus: {
           block_hash: winner.block_hash,
           height: winner.height,
@@ -508,11 +559,7 @@ const pair_request = async (db, payload, nodes, type) => {
     };
   } catch (error) {
     console.error("[pair_request ERROR]", error);
-    return {
-      RM: "Internal server error",
-      RC: 500,
-      RD: error.message,
-    };
+    return { RM: "Internal server error", RC: 500, RD: error.message };
   }
 };
 

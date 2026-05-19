@@ -41,7 +41,6 @@ const verifyTemplateIntegrity = (template) => {
 
 const getPendingRequest = (db) => async (req, res) => {
   try {
-    console.log("getPendingRequest called");
     const ROLE_MODELS = {
       Retailer: {
         DB: db.Retailer,
@@ -293,7 +292,6 @@ const bindWsResponse = (msg) => {
 
 const getAllNodeInfo = (nodes, db) => async (req, res) => {
   try {
-    console.log("call");
     const peerList = await db.peer_map.findAll({
       attributes: [
         "id",
@@ -445,7 +443,7 @@ const product_upload = (db) => async (req, res) => {
     cleanupUploadedFiles(allFiles);
     return res.status(400).json({
       RC: -203,
-      RM: "Thiếu dữ liệu!",
+      RM: "Thiếu dữ liệu định danh công ty!",
     });
   }
 
@@ -457,13 +455,13 @@ const product_upload = (db) => async (req, res) => {
     stock_quantity,
     status,
     category_id,
-  } = req.body;
+  } = req?.body;
 
   if (!name || !price || !status || !type || !stock_quantity || !category_id) {
     cleanupUploadedFiles(allFiles);
     return res.status(400).json({
       RC: -203,
-      RM: "Thiếu dữ liệu!",
+      RM: "Thiếu dữ liệu bắt buộc!",
     });
   }
 
@@ -484,22 +482,34 @@ const product_upload = (db) => async (req, res) => {
       product_id = Helper__funtion.genId("PRODUCT_");
     } while (await Helper__funtion.validCheckID(product_id, db.Product, "id"));
 
-    const product = await db.Product.create(
+    const product_master = await db.Product.create(
       {
         id: product_id,
-        name,
-        price,
-        author: req?.user?.company_id,
+        author: company_id,
         type,
-        responsible_person: req?.user?.id,
-        description: description || "",
-        main_cardimage: mainImage.filename,
-        status,
         stock_quantity,
         category_id,
       },
       { transaction: t },
     );
+
+    const product_metadata = await db.Product_Metadata.create(
+      {
+        product_id: product_id,
+        version: 1,
+        is_latest: true,
+        name,
+        price,
+        responsible_person: req?.user?.id,
+        description: description || "",
+        main_cardimage: mainImage.filename,
+        status,
+        chain_status: "pending",
+      },
+      { transaction: t },
+    );
+
+    // ==========================================
 
     let indexCount = 1;
     for (const card of subFiles) {
@@ -528,10 +538,16 @@ const product_upload = (db) => async (req, res) => {
 
     await t.commit();
 
+    const responseData = {
+      ...product_master.toJSON(),
+      ...product_metadata.toJSON(),
+      id: product_id,
+    };
+
     return res.status(200).json({
       RC: 200,
       RM: "Thêm sản phẩm thành công!",
-      RD: product,
+      RD: responseData,
     });
   } catch (error) {
     await t.rollback();
@@ -571,8 +587,6 @@ const cleanupSingleFile = async (file) => {
       await fs.access(filePath);
 
       await fs.unlink(filePath);
-
-      console.log(`[File System] Successfully deleted: ${filePath}`);
     } catch (err) {
       if (err.code !== "ENOENT") {
         console.error(`[File System] Error processing file ${filePath}:`, err);
@@ -581,30 +595,58 @@ const cleanupSingleFile = async (file) => {
   }
 };
 
-const getUserProductPending = (db) => async (req, res) => {
+const getUserProductList = (db) => async (req, res) => {
   try {
     const company_id = req?.user?.company_id;
     if (!company_id) {
-      return res.status(200).json({
-        RM: "thiếu dữ liệu đầu vào!",
+      return res.status(400).json({
+        RM: "Thiếu dữ liệu đầu vào!",
         RC: -203,
       });
     }
 
-    const product_list = await db.Product.findAll({
+    const raw_product_list = await db.Product.findAll({
       where: {
         author: company_id,
       },
+      include: [
+        {
+          model: db.Product_Metadata,
+          as: "versions",
+          where: {
+            is_latest: true,
+          },
+          required: true,
+        },
+      ],
+    });
+
+    const formatted_list = raw_product_list.map((prod) => {
+      const prodJson = prod.toJSON();
+
+      const metadata =
+        prodJson.versions && prodJson.versions.length > 0
+          ? prodJson.versions[0]
+          : {};
+
+      delete prodJson.versions;
+
+      return {
+        ...prodJson,
+        ...metadata,
+        id: prodJson.id,
+        metadata_id: metadata.id,
+      };
     });
 
     return res.status(200).json({
-      RM: "Sản phẩm của người dùng",
+      RM: "Lấy danh sách Sản phẩm chờ duyệt thành công",
       RC: 200,
-      RD: product_list,
+      RD: formatted_list,
     });
   } catch (error) {
-    console.error(error);
-    return res.status(200).json({
+    console.error("getUserProductPending error:", error);
+    return res.status(500).json({
       RM: "Internal server error!",
       RC: 500,
     });
@@ -637,7 +679,7 @@ const repair_block = (db, nodes) => async (req, res) => {
     const item_hash = crypto.createHash("sha256").update(data).digest("hex");
 
     const payload = {
-      timestamp: Date.now(),
+      timestamp: String(Date.now()),
       payload: {
         item_id: data.item_id,
         hash: item_hash,
@@ -796,23 +838,53 @@ const getValidProduct = (db) => async (req, res) => {
     const company_id = req?.user?.company_id;
     if (!company_id) {
       return res.status(400).json({
-        RM: "Lỗi thiếu dữ liệu!",
+        RM: "Lỗi thiếu dữ liệu định danh công ty!",
         RC: -203,
       });
     }
-    const products = await db.Product.findAll({
+
+    const raw_products = await db.Product.findAll({
       where: {
-        chain_status: "active",
         author: company_id,
       },
+      include: [
+        {
+          model: db.Product_Metadata,
+          as: "versions",
+          where: {
+            is_latest: true,
+            chain_status: "active",
+          },
+          required: true,
+        },
+      ],
     });
+
+    const formatted_list = raw_products.map((prod) => {
+      const prodJson = prod.toJSON();
+
+      const metadata =
+        prodJson.versions && prodJson.versions.length > 0
+          ? prodJson.versions[0]
+          : {};
+
+      delete prodJson.versions;
+
+      return {
+        ...prodJson,
+        ...metadata,
+        id: prodJson.id,
+        metadata_id: metadata.id,
+      };
+    });
+
     return res.status(200).json({
       RM: "Lấy sản phẩm hợp lệ thành công!",
       RC: 200,
-      RD: products,
+      RD: formatted_list,
     });
   } catch (error) {
-    console.error(error);
+    console.error("getValidProduct error:", error);
     return res.status(500).json({
       RM: "Internal server error!",
       RC: 500,
@@ -867,9 +939,11 @@ const createBatch = (db) => async (req, res) => {
       Department_id,
       description,
       manufacture_date,
+      pinner_id,
       packaging_id,
       expiry_date,
       quantity,
+      payment_method,
     } = req.body.formData;
 
     const author = req?.user?.company_id;
@@ -925,25 +999,34 @@ const createBatch = (db) => async (req, res) => {
       ],
     });
 
-    const product = await db.Product.findByPk(product_id);
+    const product_master = await db.Product.findByPk(product_id);
+    const product_metadata = await db.Product_Metadata.findOne({
+      where: {
+        product_id: product_id,
+        is_latest: true,
+      },
+    });
+
     const box = await db.Product_Packaging.findByPk(packaging_id);
 
-    if (!product || !box || !Department) {
+    if (!product_master || !product_metadata || !box || !Department) {
       return res.status(400).json({
-        RM: "Không tìm thấy sản phẩm hoặc bao bì đối chứng, dữ liệu không hợp lệ!",
+        RM: "Không tìm thấy sản phẩm (hoặc chưa có phiên bản), bao bì, hoặc phòng ban!",
         RC: -403,
       });
     }
 
-    if (parseFloat(product.weight) > parseFloat(box.max_weight_capacity)) {
+    if (
+      parseFloat(product_metadata.weight) > parseFloat(box.max_weight_capacity)
+    ) {
       return res.status(400).json({
         RM: "Trọng lượng 1 sản phẩm vượt quá tải trọng của hộp!",
         RC: -403,
       });
     }
 
-    const logistics = ((prod, bx, qty) => {
-      const unitW = parseFloat(prod.weight) || 0;
+    const logistics = ((metadata, bx, qty) => {
+      const unitW = parseFloat(metadata.weight) || 0;
       const bVol = parseFloat(bx.volume) || 0;
       const tQty = parseInt(qty) || 0;
 
@@ -967,7 +1050,7 @@ const createBatch = (db) => async (req, res) => {
         totalBox: totalBox,
         totalPallet: finalPallets,
       };
-    })(product, box, quantity);
+    })(product_metadata, box, quantity);
 
     let status = mfgDate > today ? "pending" : "in_progress";
 
@@ -975,6 +1058,8 @@ const createBatch = (db) => async (req, res) => {
       id,
       batch_name,
       product_id,
+      Order_owner: pinner_id,
+      product_metadata_id: product_metadata.id,
       Product_box_model: packaging_id,
       Department_id,
       weight_per_unit: logistics.unitWeight,
@@ -994,20 +1079,22 @@ const createBatch = (db) => async (req, res) => {
       noitfi_level: 2,
       linkToAction: `/Products/Manufacturer/process?highline=${batch.id}&openModal=false`,
       status: "unread",
-      message: `Yêu cầu sản xuất mới lo hàng ${batch.id}, kiểm tra ngay!`,
+      message: `Yêu cầu sản xuất mới lô hàng ${batch.id}, kiểm tra ngay!`,
     });
 
     await NotificationService.sendSmartNotification(
       noti?.id,
       author,
       "production",
-      `Yêu cầu sản xuất mới lo hàng ${batch.id}, kiểm tra ngay!`,
+      `Yêu cầu sản xuất mới lô hàng ${batch.id}, kiểm tra ngay!`,
       [Department?.leader?.id],
       "production_create",
       "level_2",
       `/Products/Manufacturer/process?highline=${batch.id}&openModal=false`,
       false,
     );
+
+    req.ai_final_payload = batch.get({ plain: true });
 
     return res.status(200).json({
       RM: "Khởi tạo kế hoạch lô hàng thành công!",
@@ -1029,9 +1116,11 @@ const getDepartmentsBatch = (db) => async (req, res) => {
         RC: -203,
       });
     }
+
+    // 1. TRUY VẤN DỮ LIỆU ĐÃ ĐƯỢC CHUẨN HÓA SCHEMA
     const departments = await db.Department.findAll({
       where: {
-        leader_id: { [Op.ne]: null },
+        leader_id: { [db.Sequelize.Op.ne]: null }, // Dùng db.Sequelize.Op để tránh lỗi undefined Op
         active: true,
         company_id: author,
       },
@@ -1062,19 +1151,56 @@ const getDepartmentsBatch = (db) => async (req, res) => {
             {
               model: db.Product,
               as: "product",
-              attributes: ["id", "name", "main_cardimage"],
+              attributes: ["id", "author", "type"], // Chỉ lấy cột có thật trong bảng Product
+              include: [
+                {
+                  model: db.Product_Metadata,
+                  as: "versions",
+                  where: { is_latest: true }, // Chỉ lấy metadata mới nhất
+                  attributes: ["name", "main_cardimage"],
+                  required: false, // Tránh rớt batch nếu thiếu metadata
+                },
+              ],
             },
           ],
         },
       ],
     });
+
+    const flattenedDepartments = departments.map((dept) => {
+      const deptJson = dept.toJSON();
+
+      if (deptJson.batches && deptJson.batches.length > 0) {
+        deptJson.batches.forEach((batch) => {
+          if (
+            batch.product &&
+            batch.product.versions &&
+            batch.product.versions.length > 0
+          ) {
+            const metadata = batch.product.versions[0];
+
+            batch.product.name = metadata.name;
+            batch.product.main_cardimage = metadata.main_cardimage;
+
+            delete batch.product.versions;
+          } else if (batch.product) {
+            batch.product.name = "Chưa có dữ liệu phiên bản";
+            batch.product.main_cardimage = null;
+            delete batch.product.versions;
+          }
+        });
+      }
+
+      return deptJson;
+    });
+
     return res.status(200).json({
       RM: "Lấy bộ phận hợp lệ thành công!",
       RC: 200,
-      RD: departments,
+      RD: flattenedDepartments,
     });
   } catch (error) {
-    console.error(error);
+    console.error("getDepartmentsBatch Error:", error);
     return res.status(500).json({
       RM: "Internal server error!",
       RC: 500,
@@ -1131,7 +1257,9 @@ const getCompletedBatches = (db) => async (req, res) => {
         RC: -203,
       });
     }
-    const batches = await db.product_batch.findAll({
+
+    // 1. QUERY KÉO CẢ CÀNH VÀ LÁ
+    const rawBatches = await db.product_batch.findAll({
       where: {
         status: [
           "completed",
@@ -1143,18 +1271,18 @@ const getCompletedBatches = (db) => async (req, res) => {
         author,
       },
       include: [
-        {
-          model: db.Department,
-          as: "Department",
-        },
-        {
-          model: db.Product_Packaging,
-          as: "boxed",
-        },
+        { model: db.Department, as: "Department" },
+        { model: db.Product_Packaging, as: "boxed" },
+        // Kéo Gốc (Cành)
         {
           model: db.Product,
           as: "product",
-          attributes: ["id", "name", "main_cardimage"],
+          attributes: ["id"],
+        },
+        {
+          model: db.Product_Metadata,
+          as: "product_version",
+          attributes: ["name", "main_cardimage"],
         },
         {
           model: db.Actor_model,
@@ -1187,26 +1315,57 @@ const getCompletedBatches = (db) => async (req, res) => {
       ],
     });
 
+    // 2. LÀM PHẲNG DỮ LIỆU & TỐI ƯU VÒNG LẶP (O(n))
     const RD = {
-      pending: batches.filter((b) => b.status === "pending"),
-      pairing: batches.filter((b) => b.status === "pairing"),
-      completed: batches.filter((b) => b.status === "completed" && b.is_boxed),
-      qc_passed: batches.filter((b) => b.status === "QC_passed"),
-      not_comlate: batches.filter((b) => b.status === "not_completed"),
+      pending: [],
+      pairing: [],
+      completed: [],
+      qc_passed: [],
+      not_comlate: [],
     };
+
+    for (let i = 0; i < rawBatches.length; i++) {
+      const b = rawBatches[i].toJSON();
+
+      // Gom Cành và Lá lại thành object "product" y hệt code cũ để cứu Frontend
+      b.product = {
+        id: b.product_master?.id || b.product_id,
+        name: b.product_version?.name || "Chưa cập nhật tên",
+        main_cardimage: b.product_version?.main_cardimage || "",
+      };
+
+      delete b.product_master;
+      delete b.product_version;
+
+      const status = b.status?.toLowerCase();
+
+      if (status === "pending") {
+        RD.pending.push(b);
+      } else if (status === "pairing") {
+        RD.pairing.push(b);
+      } else if (status === "completed" && b.is_boxed) {
+        RD.completed.push(b);
+      } else if (status === "qc_passed") {
+        RD.qc_passed.push(b);
+      } else if (status === "not_completed") {
+        RD.not_comlate.push(b);
+      }
+    }
+
     return res.status(200).json({
-      RM: "Lấy batch đã hoàn thành thành công!",
+      RM: "Lấy dữ liệu lô hàng thành công!",
       RC: 200,
       RD: RD,
     });
   } catch (error) {
-    console.error(error);
+    console.error("getCompletedBatches Error:", error);
     return res.status(500).json({
       RM: "Internal server error!",
       RC: 500,
     });
   }
 };
+
 const getQCReadyBatches = (db) => async (req, res) => {
   try {
     const author = req?.user?.company_id;
@@ -1216,11 +1375,27 @@ const getQCReadyBatches = (db) => async (req, res) => {
         RC: -203,
       });
     }
-    const batches = await db.product_batch.findAll({
+
+    // 1. Phân trang (Pagination)
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 100;
+    const offset = (page - 1) * limit;
+
+    // 2. Lọc theo trạng thái (Frontend có thể gọi ?status=QC_checking)
+    const requestedStatus = req.query.status;
+    const allowedStatuses = ["QC_checking", "QC_passed", "QC_failed"];
+    const statusFilter = allowedStatuses.includes(requestedStatus)
+      ? requestedStatus
+      : allowedStatuses;
+
+    const { count, rows } = await db.product_batch.findAndCountAll({
       where: {
-        status: ["QC_checking", "QC_passed", "QC_failed"],
+        status: statusFilter,
         author,
       },
+      limit: limit,
+      offset: offset,
+      order: [["updatedAt", "DESC"]],
       include: [
         {
           model: db.Department,
@@ -1229,7 +1404,16 @@ const getQCReadyBatches = (db) => async (req, res) => {
         {
           model: db.Product,
           as: "product",
-          attributes: ["id", "name", "main_cardimage"],
+          attributes: ["id", "author", "type"],
+          include: [
+            {
+              model: db.Product_Metadata,
+              as: "versions",
+              where: { is_latest: true },
+              attributes: ["name", "main_cardimage"],
+              required: false,
+            },
+          ],
         },
         {
           model: db.Actor_model,
@@ -1245,13 +1429,43 @@ const getQCReadyBatches = (db) => async (req, res) => {
         },
       ],
     });
+
+    const flattenedRows = rows.map((batch) => {
+      const batchJson = batch.toJSON();
+
+      if (
+        batchJson.product &&
+        batchJson.product.versions &&
+        batchJson.product.versions.length > 0
+      ) {
+        const metadata = batchJson.product.versions[0];
+
+        batchJson.product.name = metadata.name;
+        batchJson.product.main_cardimage = metadata.main_cardimage;
+
+        delete batchJson.product.versions;
+      } else if (batchJson.product) {
+        batchJson.product.name = "Chưa có dữ liệu phiên bản";
+        batchJson.product.main_cardimage = null;
+        delete batchJson.product.versions;
+      }
+
+      return batchJson;
+    });
+
     return res.status(200).json({
       RM: "Lấy batch sẵn sàng QC thành công!",
       RC: 200,
-      RD: batches,
+      RD: flattenedRows,
+      Meta: {
+        totalItems: count,
+        totalPages: Math.ceil(count / limit),
+        currentPage: page,
+        limit: limit,
+      },
     });
   } catch (error) {
-    console.error(error);
+    console.error("getQCReadyBatches Error:", error);
     return res.status(500).json({
       RM: "Internal server error!",
       RC: 500,
@@ -1445,6 +1659,7 @@ const newInternalMarketinfo = (db) => async (req, res) => {
     let result;
     if (existingProfile) {
       result = await existingProfile.update(marketData, { transaction: t });
+      req.ai_mapped_payload = existingProfile.toJSON();
     } else {
       result = await db.Company_market_info.create(marketData, {
         transaction: t,
@@ -1658,7 +1873,7 @@ const new_proposal = (db) => async (req, res) => {
       Owner_id: result?.receiver_id || receiver_id,
       noitfi_level: 4,
       linkToAction: `/Products/policy/contact_request?highline=${result.id}&openModal=false`,
-      status: "not_seen",
+      status: "unread",
       message: `Yêu cầu hợp tác mời từ công ty ${sender_company_name} `,
     });
 
@@ -1904,7 +2119,7 @@ const cancelProposal = (db) => async (req, res) => {
       },
       { transaction: t },
     );
-
+    req.ai_mapped_payload = proposal.toJSON();
     await t.commit();
     return res.status(200).json({
       RC: 200,
@@ -1958,14 +2173,14 @@ const RejectProposal = (db) => async (req, res) => {
       },
       { transaction: t },
     );
-
+    req.ai_mapped_payload = proposal.toJSON();
     const noti = await db.Notification.create(
       {
         Owner_id: proposal.sender_id,
         noitfi_level: "4",
         message: `Công ty ${proposal.receiver_company_name} đã từ chối lời mời hợp tác.`,
         linkToAction: `/Products/policy/contact_request?highline=${proposal.id}&openModal=true`,
-        status: "not_seen",
+        status: "unread",
       },
       { transaction: t },
     );
@@ -2031,7 +2246,6 @@ const createContractTemplate = (db) => async (req, res) => {
   const file = req?.file;
   try {
     const { company_id, id } = req.user;
-    console.log(req.body);
     const { template_name, collaboration_type, content_html, is_active } =
       req.body;
 
@@ -2141,7 +2355,7 @@ const acceptProposal = (db) => async (req, res) => {
         noitfi_level: "4",
         message: `Công ty ${proposal_contract.receiver_company_name} đã chấp nhận lời mời hợp tác.`,
         linkToAction: `/Products/policy/contact_request?highline=${proposal_contract.id}&openModal=true`,
-        status: "not_seen",
+        status: "unread",
       },
       { transaction: t },
     );
@@ -2227,7 +2441,7 @@ const sendContract = (db) => async (req, res) => {
         noitfi_level: "4",
         message: `Đối tác đã gửi dự thảo hợp đồng: ${template.template_name}`,
         linkToAction: `/Products/policy/contact_request?highline=${proposal_contract.id}&openModal=true`,
-        status: "not_seen",
+        status: "unread",
       },
       { transaction: t },
     );
@@ -2307,7 +2521,7 @@ const AcceptsendContract = (db) => async (req, res) => {
         noitfi_level: "4",
         message: `Đối tác đã chấp nhận hợp đồng `,
         linkToAction: `/Products/policy/contact_request?highline=${proposal_contract.id}&openModal=true`,
-        status: "not_seen",
+        status: "unread",
       },
       { transaction: t },
     );
@@ -2386,7 +2600,7 @@ const RejectsendContract = (db) => async (req, res) => {
         noitfi_level: "4",
         message: `Đối tác đã từ chối hợp đồng `,
         linkToAction: `/Products/policy/contact_request?highline=${proposal_contract.id}&openModal=true`,
-        status: "not_seen",
+        status: "unread",
       },
       { transaction: t },
     );
@@ -2525,7 +2739,7 @@ const signContract = (db) => async (req, res) => {
             ? "Hợp đồng đã chính thức có hiệu lực trên Blockchain!"
             : "Đối tác đã ký hợp đồng, vui lòng ký xác nhận cuối cùng.",
         linkToAction: `/Products/policy/contact_request?highline=${proposal.id}&openModal=true`,
-        status: "not_seen",
+        status: "unread",
       },
       { transaction: t },
     );
@@ -2613,7 +2827,6 @@ const user_uploadavatar = (db) => async (req, res) => {
 
     if (file && file.path) {
       cleanupSingleFile(file);
-      console.log(`[Rollback] Đã dọn dẹp file mới do lỗi logic.`);
     }
 
     return res.status(500).json({
@@ -2626,7 +2839,7 @@ const user_uploadavatar = (db) => async (req, res) => {
 const fecthOEMproduction = (db) => async (req, res) => {
   try {
     const { Op } = db.Sequelize;
-    const { id, company_id } = req?.user;
+    const { id, company_id } = req?.user || {};
 
     if (!id || !company_id) {
       return res.status(400).json({
@@ -2666,7 +2879,16 @@ const fecthOEMproduction = (db) => async (req, res) => {
         {
           model: db.Product,
           as: "product_pinner",
-          attributes: ["id", "name", "main_cardimage", "price", "OEMfile"],
+          attributes: ["id", "author", "type"],
+          include: [
+            {
+              model: db.Product_Metadata,
+              as: "versions",
+              where: { is_latest: true },
+              required: false,
+              attributes: ["name", "main_cardimage", "price", "OEMfile"],
+            },
+          ],
         },
         {
           model: db.payment_sessions,
@@ -2704,6 +2926,15 @@ const fecthOEMproduction = (db) => async (req, res) => {
           plainItem.owner_r ||
           plainItem.owner_t;
 
+      if (plainItem.product_pinner) {
+        const metadata = plainItem.product_pinner.versions?.[0] || {};
+        delete plainItem.product_pinner.versions;
+        plainItem.product_pinner = {
+          ...plainItem.product_pinner,
+          ...metadata,
+        };
+      }
+
       const {
         pinner_m,
         pinner_d,
@@ -2723,9 +2954,25 @@ const fecthOEMproduction = (db) => async (req, res) => {
       };
     });
 
-    const productions = await db.Product.findAll({
+    const rawProductions = await db.Product.findAll({
       where: { author: company_id, OEM: true },
-      attributes: ["id", "name", "main_cardimage", "price"],
+      attributes: ["id"],
+      include: [
+        {
+          model: db.Product_Metadata,
+          as: "versions",
+          where: { is_latest: true },
+          required: false,
+          attributes: ["name", "main_cardimage", "price"],
+        },
+      ],
+    });
+
+    const productions = rawProductions.map((prod) => {
+      const p = prod.toJSON();
+      const meta = p.versions?.[0] || {};
+      delete p.versions;
+      return { ...p, ...meta };
     });
 
     const partners = await db.Company_Collaboration.findAll({
@@ -2751,7 +2998,6 @@ const fecthOEMproduction = (db) => async (req, res) => {
     const rawPartners = partners
       .map((item) => {
         const isSender = item.sender_id === company_id;
-        // Lấy đối tác là Manufacturer
         const partnerData = isSender ? item.receiver_m : item.sender_m;
 
         return {
@@ -2761,7 +3007,7 @@ const fecthOEMproduction = (db) => async (req, res) => {
           partner_info: partnerData,
         };
       })
-      .filter((p) => p.partner_info); // Chỉ giữ lại các đối tác là Manufacturer để hiện trong Select tạo đơn
+      .filter((p) => p.partner_info);
 
     return res.status(200).json({
       RM: "Lấy dữ liệu thành công!",
@@ -2776,6 +3022,7 @@ const fecthOEMproduction = (db) => async (req, res) => {
     });
   }
 };
+
 const editProduct = (db) => async (req, res) => {
   const t = await db.sequelize.transaction();
   const file = req?.file;
@@ -2783,44 +3030,73 @@ const editProduct = (db) => async (req, res) => {
   try {
     const { product_id } = req.params;
     const { status, base_price, OEM, items_per_box, weight } = req.body;
-    const product = await db.Product.findByPk(product_id, { transaction: t });
-    if (!product) {
+
+    const product_master = await db.Product.findByPk(product_id, {
+      transaction: t,
+    });
+    if (!product_master) {
       if (file) cleanupSingleFile(file);
       await t.rollback();
       return res.status(404).json({ RC: 404, RM: "Sản phẩm không tồn tại!" });
     }
-    const updateData = {
-      items_per_box: items_per_box || product.items_per_box,
-      weight: weight || product.weight,
-      status: status || product.status,
-      price: base_price ? Number(base_price) : product.price,
-      OEM: OEM === "true" || OEM === true,
+
+    const currentMetadata = await db.Product_Metadata.findOne({
+      where: { product_id: product_id, is_latest: true },
+      transaction: t,
+    });
+
+    if (!currentMetadata) {
+      if (file) cleanupSingleFile(file);
+      await t.rollback();
+      return res.status(404).json({
+        RC: 404,
+        RM: "Không tìm thấy phiên bản hiện hành của sản phẩm!",
+      });
+    }
+
+    await product_master.update(
+      {
+        OEM:
+          OEM !== undefined
+            ? OEM === "true" || OEM === true
+            : product_master.OEM,
+        items_per_box: items_per_box || product_master.items_per_box,
+      },
+      { transaction: t },
+    );
+
+    await currentMetadata.update({ is_latest: false }, { transaction: t });
+
+    const newMetadataData = {
+      product_id: product_id,
+      version: currentMetadata.version + 1,
+      is_latest: true,
+      chain_status: "pending",
+      txt_hash: null,
+
+      name: currentMetadata.name,
+      description: currentMetadata.description,
+      main_cardimage: currentMetadata.main_cardimage,
+      responsible_person: currentMetadata.responsible_person,
+      weight_type: currentMetadata.weight_type,
+      weight: weight || currentMetadata.weight,
+      status: status || currentMetadata.status,
+      price: base_price ? Number(base_price) : currentMetadata.price,
+      OEMfile: file ? file.filename : currentMetadata.OEMfile,
     };
 
-    let oldFilePath = null;
-    if (file) {
-      const oldFileName = product.OEMfile;
-      updateData.OEMfile = file.filename;
+    const newMetadata = await db.Product_Metadata.create(newMetadataData, {
+      transaction: t,
+    });
 
-      if (oldFileName && oldFileName !== "null" && oldFileName !== "") {
-        const DOCS_DIR = path.join(__dirname, "../../Access/OEM_toturial");
-        oldFilePath = path.join(DOCS_DIR, oldFileName);
-      }
-    }
-
-    await product.update(updateData, { transaction: t });
     await t.commit();
 
-    if (oldFilePath) {
-      await fs
-        .unlink(oldFilePath)
-        .catch(() => console.warn(`[Cleanup] Không tìm thấy file cũ, bỏ qua.`));
-    }
+    req.ai_mapped_payload = { ...newMetadata.toJSON() };
 
     return res.status(200).json({
       RC: 200,
-      RM: "Cập nhật cấu hình sản phẩm thành công!",
-      RD: product,
+      RM: `Đã phát hành phiên bản v${newMetadata.version}! Đang chờ duyệt lên Blockchain.`,
+      RD: req.ai_mapped_payload,
     });
   } catch (error) {
     console.error("Edit Product Error:", error);
@@ -2829,7 +3105,7 @@ const editProduct = (db) => async (req, res) => {
 
     return res.status(500).json({
       RC: 500,
-      RM: "Lỗi hệ thống khi cập nhật sản phẩm!",
+      RM: "Lỗi hệ thống khi cập nhật phiên bản sản phẩm!",
     });
   }
 };
@@ -2891,7 +3167,7 @@ const newOEMrequest = (db) => async (req, res) => {
       Owner_id: partner_id,
       noitfi_level: "4",
       linkToAction: `/Products/Manufacturer/ORM?highline=${result.id}&openModal=false`,
-      status: "not_seen",
+      status: "unread",
       message: `Bạn có một yêu cầu gia công mới cho sản phẩm ID: ${product_id}`,
     });
 
@@ -2921,14 +3197,17 @@ const newOEMrequest = (db) => async (req, res) => {
 
 const getValidOEMDepartment = (db) => async (req, res) => {
   try {
+    const { Op } = db.Sequelize;
     const author = req?.user?.company_id;
+
     if (!author) {
       return res.status(400).json({
-        RM: "Thiếu dữ liệu!",
+        RM: "Thiếu dữ liệu định danh công ty!",
         RC: -203,
       });
     }
-    const departments = await db.Department.findAll({
+
+    const rawDepartments = await db.Department.findAll({
       where: {
         leader_id: { [Op.ne]: null },
         active: true,
@@ -2945,7 +3224,7 @@ const getValidOEMDepartment = (db) => async (req, res) => {
           as: "batches",
           required: false,
           where: {
-            status: [`pending`, `in_progress`],
+            status: ["pending", "in_progress"],
           },
           attributes: [
             "id",
@@ -2959,20 +3238,51 @@ const getValidOEMDepartment = (db) => async (req, res) => {
             {
               model: db.Product,
               as: "product",
-
-              attributes: ["id", "name", "main_cardimage"],
+              attributes: ["id"],
+            },
+            {
+              model: db.Product_Metadata,
+              as: "product_version",
+              attributes: ["name", "main_cardimage"],
             },
           ],
         },
       ],
     });
+
+    const departments = rawDepartments.map((dept) => {
+      const d = dept.toJSON();
+
+      if (d.batches && d.batches.length > 0) {
+        d.batches = d.batches.map((batch) => {
+          const { product, product_version, ...batchData } = batch;
+
+          return {
+            ...batchData,
+            product: {
+              id: product?.id || "",
+              name: product_version?.name || "Chưa cập nhật tên",
+              main_cardimage: product_version?.main_cardimage || "",
+            },
+          };
+        });
+      }
+      return d;
+    });
+
+    const productbox = await db.Product_Packaging.findAll({
+      where: {
+        author: author,
+      },
+    });
+
     return res.status(200).json({
       RM: "Lấy bộ phận hợp lệ thành công!",
       RC: 200,
-      RD: departments,
+      RD: { departments, productbox },
     });
   } catch (error) {
-    console.error(error);
+    console.error("getValidOEMDepartment error:", error);
     return res.status(500).json({
       RM: "Internal server error!",
       RC: 500,
@@ -2984,7 +3294,7 @@ const AcceptingOrder = (db) => async (req, res) => {
   const t = await db.sequelize.transaction();
 
   try {
-    const { company_id, id } = req?.user;
+    const { company_id, id: actor_id } = req?.user || {};
     const {
       Department_id,
       Pinned_id,
@@ -2992,43 +3302,118 @@ const AcceptingOrder = (db) => async (req, res) => {
       description,
       expiry_date,
       isOEM,
+      Box_id,
       manufacture_date,
       product_id,
       quantity,
-    } = req?.body?.data;
+    } = req?.body?.data || {};
 
-    if (!Pinned_id || !product_id || !Department_id) {
+    if (
+      !Pinned_id ||
+      !product_id ||
+      !Department_id ||
+      !batch_name ||
+      !quantity ||
+      !manufacture_date ||
+      !expiry_date ||
+      !Box_id
+    ) {
+      await t.rollback();
+      return res
+        .status(400)
+        .json({ RM: "Thiếu thông tin bắt buộc để duyệt gia công!", RC: -203 });
+    }
+
+    const [pinnedRecord, latestMetadata, box] = await Promise.all([
+      db.Pinned_Products.findOne({ where: { id: Pinned_id }, transaction: t }),
+      db.Product_Metadata.findOne({
+        where: { product_id: product_id, is_latest: true },
+        transaction: t,
+      }),
+      db.Product_Packaging.findByPk(Box_id, { transaction: t }),
+    ]);
+
+    if (!pinnedRecord) {
+      await t.rollback();
+      return res
+        .status(404)
+        .json({ RM: "Không tìm thấy hồ sơ ghim sản phẩm!", RC: -404 });
+    }
+
+    if (!latestMetadata || !box) {
+      await t.rollback();
       return res.status(400).json({
-        RM: "Thiếu thông tin bắt buộc để duyệt gia công!",
-        RC: -203,
+        RM: "Sản phẩm (Metadata) hoặc loại bao bì không tồn tại!",
+        RC: -400,
       });
     }
 
-    const pinnedRecord = await db.Pinned_Products.findOne({
-      where: { id: Pinned_id },
-    });
+    if (
+      parseFloat(latestMetadata.weight) > parseFloat(box.max_weight_capacity)
+    ) {
+      await t.rollback();
+      return res.status(400).json({
+        RM: "Trọng lượng 1 sản phẩm vượt quá tải trọng của hộp đã chọn!",
+        RC: -403,
+      });
+    }
+
+    const logistics = ((metadata, bx, qty) => {
+      const unitW = parseFloat(metadata.weight) || 0;
+      const bVol = parseFloat(bx.volume) || 0;
+      const tQty = parseInt(qty) || 0;
+
+      const PALLET_W_LIMIT = 1000;
+      const PALLET_V_LIMIT = 1.8;
+
+      const itemsPerBox =
+        Math.floor(parseFloat(bx.max_weight_capacity) / unitW) || 1;
+      const totalBox = Math.ceil(tQty / itemsPerBox);
+
+      const totalWeight = unitW * tQty;
+      const totalVolume = totalBox * bVol;
+
+      const finalPallets = Math.ceil(
+        Math.max(totalWeight / PALLET_W_LIMIT, totalVolume / PALLET_V_LIMIT),
+      );
+
+      return {
+        unitWeight: unitW,
+        totalWeight: totalWeight.toFixed(2),
+        totalBox: totalBox,
+        totalPallet: finalPallets,
+      };
+    })(latestMetadata, box, quantity);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const mfgDate = new Date(manufacture_date);
+    let batchStatus = mfgDate > today ? "pending" : "in_progress";
 
     const newBatch = await db.product_batch.create(
       {
         id: `BATCH_${uuidv4().substring(0, 8).toUpperCase()}`,
         batch_name,
         Department_id,
-        product_id,
+        product_id: product_id,
+        Order_owner: Pinned_id,
+        product_metadata_id: latestMetadata.id,
         author: company_id,
         description,
         manufacture_date,
         expiry_date,
+        Product_box_model: Box_id,
         isOEM: pinnedRecord.is_OEM,
-        status: "in_progress",
+        status: batchStatus,
         quantity,
         progress_quantity: 0,
+        weight_per_unit: logistics.unitWeight,
+        total_weight: logistics.totalWeight,
+        total_box: logistics.totalBox,
+        total_pallet: logistics.totalPallet,
       },
       { transaction: t },
     );
-
-    if (!pinnedRecord) {
-      throw new Error("Không tìm thấy hồ sơ ghim sản phẩm!");
-    }
 
     await db.Pinned_Products.update(
       { status: "active", Product_batch: newBatch.id },
@@ -3041,17 +3426,18 @@ const AcceptingOrder = (db) => async (req, res) => {
         noitfi_level: "4",
         linkToAction: `/Products/Manufacturer/ORM?highline=${pinnedRecord.id}&openModal=true`,
         status: "unread",
-        message: `Xưởng đã chấp nhận gia công sản phẩm và bắt đầu sản xuất lô hàng ${batch_name}`,
+        message: `Xưởng đã chấp nhận gia công và khởi tạo lô sản xuất ${newBatch.id}`,
       },
       { transaction: t },
     );
 
     await t.commit();
-    await NotificationService.sendSmartNotification(
+
+    NotificationService.sendSmartNotification(
       noti?.id,
       pinnedRecord.pinner_id,
       "manufacturer",
-      `Xưởng đã chấp nhận gia công sản phẩm và bắt đầu sản xuất lô hàng ${batch_name}`,
+      `Xưởng đã chấp nhận gia công và khởi tạo lô sản xuất ${newBatch.id}`,
       [],
       "order_accepted",
       "level_4",
@@ -3064,7 +3450,7 @@ const AcceptingOrder = (db) => async (req, res) => {
       RD: newBatch,
     });
   } catch (error) {
-    await t.rollback();
+    if (t) await t.rollback();
     console.error("Accept OEM Error:", error);
     return res.status(500).json({
       RM: "Lỗi hệ thống khi duyệt gia công!",
@@ -3073,6 +3459,7 @@ const AcceptingOrder = (db) => async (req, res) => {
     });
   }
 };
+
 const updateBatchQuantityApi = (db) => async (req, res) => {
   try {
     const { batch_id, quantity } = req.params;
@@ -3109,6 +3496,8 @@ const updateBatchQuantityApi = (db) => async (req, res) => {
       status: newQty >= batch.quantity ? "QC_checking" : "in_progress",
     });
 
+    req.ai_mapped_payload = batch.toJSON();
+
     return res.status(200).json({
       RM: "Đã ghi nhận tiến độ sản xuất mới",
       RC: 200,
@@ -3136,11 +3525,14 @@ const getProposalProduct = (db) => async (req, res) => {
 
     const collaborations = await db.Company_Collaboration.findAll({
       where: {
-        sender_id: company_id,
+        [db.Sequelize.Op.or]: [
+          { sender_id: company_id },
+          { receiver_id: company_id },
+        ],
         collaboration_type: ["Comprehensive Partnership", "Distributor"],
         status: "official",
       },
-      attributes: ["receiver_id"],
+      attributes: ["sender_id", "receiver_id"],
     });
 
     if (!collaborations || collaborations.length === 0) {
@@ -3149,38 +3541,67 @@ const getProposalProduct = (db) => async (req, res) => {
         .json({ RC: 200, RM: "Chưa có đối tác sản xuất nào!", RD: [] });
     }
 
-    const partnerIds = collaborations.map((col) => col.receiver_id);
+    const partnerIds = collaborations.map((col) =>
+      col.sender_id === company_id ? col.receiver_id : col.sender_id,
+    );
 
-    const products = await db.Product.findAll({
+    const uniquePartnerIds = [...new Set(partnerIds)];
+
+    const rawProducts = await db.Product.findAll({
       where: {
-        author: partnerIds,
-        status: [
-          "available",
-          "exclusive",
-          "pre_order",
-          "custom_order",
-          "limited_edition",
-        ],
-        chain_status: "active",
+        author: uniquePartnerIds,
       },
       include: [
+        {
+          model: db.Product_Metadata,
+          as: "versions",
+          where: {
+            is_latest: true,
+            chain_status: "active",
+            status: [
+              "available",
+              "exclusive",
+              "pre_order",
+              "custom_order",
+              "limited_edition",
+            ],
+          },
+          required: true,
+
+          include: [
+            {
+              model: db.Item_image,
+              as: "sub_images",
+              attributes: ["id", "image_name", "index"],
+              required: false,
+            },
+          ],
+        },
         {
           model: db.Manufacturer,
           as: "manufacturer_info",
           attributes: ["company_name", "logo"],
         },
-        {
-          model: db.Item_image,
-          as: "sub_images",
-          attributes: ["id", "image_name", "index"],
-        },
       ],
+    });
+
+    const flattenedProducts = rawProducts.map((prod) => {
+      const p = prod.toJSON();
+      const metadata = p.versions && p.versions.length > 0 ? p.versions[0] : {};
+      delete p.versions;
+
+      return {
+        ...p,
+        ...metadata,
+        id: p.id,
+        metadata_id: metadata.id,
+      };
     });
 
     return res.status(200).json({
       RC: 200,
       RM: "Lấy danh sách sản phẩm đối tác thành công",
-      RD: products,
+      RD: flattenedProducts,
     });
   } catch (error) {
     console.error("Get Proposal Product Error:", error);
@@ -3189,6 +3610,7 @@ const getProposalProduct = (db) => async (req, res) => {
 };
 
 const newOrderrequest = (db) => async (req, res) => {
+  const t = await db.sequelize.transaction();
   try {
     const { company_id, role, id } = req?.user || {};
     const { payload } = req.body;
@@ -3213,10 +3635,11 @@ const newOrderrequest = (db) => async (req, res) => {
         status: "pending",
         createdAt: { [db.Sequelize.Op.gte]: fiveMinutesAgo },
       },
-      order: [["createdAt", "DESC"]],
+      transaction: t,
     });
 
     if (existingOrder) {
+      await t.rollback();
       return res.status(200).json({
         RC: 201,
         RM: "Bạn đã có một đơn hàng tương tự đang chờ thanh toán!",
@@ -3224,65 +3647,78 @@ const newOrderrequest = (db) => async (req, res) => {
       });
     }
 
-    const product = await db.Product.findOne({
-      where: { id: productId },
-      attributes: ["price"],
+    const latestMetadata = await db.Product_Metadata.findOne({
+      where: { product_id: productId, is_latest: true },
+      attributes: ["id", "price", "version"],
+      transaction: t,
     });
 
-    if (!product) {
-      return res.status(404).json({ RM: "Sản phẩm không tồn tại!", RC: 404 });
+    if (!latestMetadata) {
+      await t.rollback();
+      return res
+        .status(404)
+        .json({ RM: "Sản phẩm hoặc phiên bản không tồn tại!", RC: 404 });
     }
 
-    const unitPrice = parseFloat(product.price);
+    const unitPrice = parseFloat(latestMetadata.price);
     const serverTotalPrice = unitPrice * quantity;
 
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const paymentCode = `ORDERPIN${Date.now().toString().slice(-6)}${randomSuffix}`;
 
-    let debt = serverTotalPrice;
     let minimum_payment_to_start = serverTotalPrice;
     if (payload?.payment_method?.startsWith("DEPOSIT_")) {
       const percent = parseInt(payload?.payment_method?.split("_")[1]);
       minimum_payment_to_start = (serverTotalPrice / 100) * percent;
     }
 
-    const newPinned = await db.Pinned_Products.create({
-      product_id: productId,
-      owner_id: payload.owner_id,
-      pinner_id: company_id,
-      payment_status: payload.status,
-      pinner_role: role,
-      Quantity: quantity,
-      payment_method: payload.payment_method,
-      payment_code: paymentCode,
-      total_price: serverTotalPrice,
-      debt: debt,
-      minimum_payment_to_start: minimum_payment_to_start,
-      Start_date: payload.Start_date,
-      End_date: payload.End_date,
-      notes: payload.notes,
-      status: "pending",
-      is_OEM: false,
-      Company_Collaboration: payload.Company_Collaboration || null,
-    });
+    const newPinned = await db.Pinned_Products.create(
+      {
+        product_id: productId,
+        metadata_id: latestMetadata.id,
+        owner_id: payload.owner_id,
+        pinner_id: company_id,
+        payment_status: payload.status,
+        pinner_role: role,
+        Quantity: quantity,
+        payment_method: payload.payment_method,
+        payment_code: paymentCode,
+        total_price: serverTotalPrice,
+        debt: serverTotalPrice,
+        minimum_payment_to_start: minimum_payment_to_start,
+        status: "pending",
+        is_OEM: false,
+        transaction: t,
+      },
+      { transaction: t },
+    );
 
-    await db.payment_sessions.create({
-      order_id: newPinned.id,
-      payer_id: company_id,
-      actor_pay_id: id,
-      amount_expected: serverTotalPrice,
-      status: "pending",
-      payment_code: paymentCode,
-    });
+    await db.payment_sessions.create(
+      {
+        order_id: newPinned.id,
+        payer_id: company_id,
+        receiver_id: payload.owner_id,
+        actor_pay_id: id,
+        amount_expected: serverTotalPrice,
+        status: "pending",
+        payment_code: paymentCode,
+      },
+      { transaction: t },
+    );
 
-    const noti = await db.Notification.create({
-      Owner_id: payload.owner_id,
-      message: `Có đơn hàng mới #${newPinned.id} chờ xác nhận!`,
-      linkToAction: `/Products/Manufacturer/ORM?highline=${newPinned.id}&openModal=false`,
-      noitfi_level: "4",
-    });
+    const noti = await db.Notification.create(
+      {
+        Owner_id: payload.owner_id,
+        message: `Có đơn hàng mới #${newPinned.id} chờ xác nhận!`,
+        linkToAction: `/Products/Manufacturer/ORM?highline=${newPinned.id}&openModal=false`,
+        noitfi_level: "4",
+      },
+      { transaction: t },
+    );
 
-    await NotificationService.sendSmartNotification(
+    await t.commit();
+
+    NotificationService.sendSmartNotification(
       noti?.id,
       payload.owner_id,
       "manufacturer",
@@ -3299,6 +3735,7 @@ const newOrderrequest = (db) => async (req, res) => {
       RD: newPinned.payment_code,
     });
   } catch (error) {
+    if (t) await t.rollback();
     console.error("Create Order Request Error:", error);
     return res.status(500).json({ RM: "Lỗi hệ thống khi tạo đơn!", RC: 500 });
   }
@@ -3699,6 +4136,7 @@ const Qcresult = (db) => async (req, res) => {
         Actor_created: id,
         target_id: batch_id,
         target_type: "BATCH",
+        target_batch: parentBatch.id,
         secure_token: secure_token,
         print_status: "pending",
         status: "pending",
@@ -3785,7 +4223,8 @@ const complateBatched = (db) => async (req, res) => {
 
     await batch.update(
       {
-        status: "pending",
+        Chain_status: "pending",
+        status: "completed",
         qc_manager_id: id,
         is_boxed: true,
         updatedAt: new Date(),
@@ -3910,6 +4349,8 @@ const getShipingInfo = (db) => async (req, res) => {
 
       const partner = isSenderMe ? plain.receiver_data : plain.sender_data;
 
+      const partnerType = isSenderMe ? plain.receiver_type : plain.sender_type;
+
       if (!partner) return;
 
       const cleanItem = {
@@ -3934,7 +4375,7 @@ const getShipingInfo = (db) => async (req, res) => {
         },
       };
 
-      if (partner.base_price) {
+      if (partnerType === "TRANSPORTER") {
         shipping.push(cleanItem);
       } else {
         collaboration.push(cleanItem);
@@ -3954,10 +4395,11 @@ const getShipingInfo = (db) => async (req, res) => {
     return res.status(500).json({ RM: "Lỗi hệ thống!", RC: 500 });
   }
 };
+
 const sendRequestShiping = (db) => async (req, res) => {
   const transaction = await db.sequelize.transaction();
   try {
-    const { company_id, company_name, role } = req?.user;
+    const { company_id, role, id } = req?.user;
     const {
       shipperId,
       partnerId,
@@ -3969,6 +4411,8 @@ const sendRequestShiping = (db) => async (req, res) => {
       cost_per_km,
       type_capatry,
       type_delivery,
+      payment_method,
+      pay_earl_percent,
     } = req?.body;
 
     const batchesId = batchesMap?.map((item) => item.id) || [];
@@ -3980,7 +4424,8 @@ const sendRequestShiping = (db) => async (req, res) => {
       !type_capatry ||
       !distance ||
       !total_ship_price ||
-      !type_delivery
+      !type_delivery ||
+      !payment_method
     ) {
       return res.status(400).json({
         RM: "Thiếu thông tin đối tác hoặc danh sách lô hàng!",
@@ -4038,7 +4483,6 @@ const sendRequestShiping = (db) => async (req, res) => {
       (sum, b) => sum + parseFloat(b.total_price || 0),
       0,
     );
-
     let total_weight = batches.reduce(
       (sum, b) => sum + parseFloat(b.total_weight || 0),
       0,
@@ -4057,7 +4501,11 @@ const sendRequestShiping = (db) => async (req, res) => {
         customer_id: partnerId,
         shipping_partner: shipperId,
         total_quantity: totalQty,
+        payment_method,
         total_ship_price,
+        amount_ship_received: 0,
+        minimum_payment_to_start: (total_ship_price / 100) * pay_earl_percent,
+        deposit_ship_percent: pay_earl_percent,
         total_weight,
         start_lat: sender.latitude,
         start_lng: sender.longitude,
@@ -4067,6 +4515,7 @@ const sendRequestShiping = (db) => async (req, res) => {
         target_add: receiver.location,
         onchain_status: "agreement_pending",
         distance,
+        debt: total_ship_price,
         delivery_address: deliveryAddress || "Theo hợp đồng",
         status: "proposed",
         sender_confirm: "confirmed",
@@ -4078,6 +4527,7 @@ const sendRequestShiping = (db) => async (req, res) => {
         type_delivery,
         note: note || "",
         Location_last_update: new Date(),
+        payment_status: "unpaid",
       },
       { transaction },
     );
@@ -4087,47 +4537,149 @@ const sendRequestShiping = (db) => async (req, res) => {
       { where: { id: batchesId }, transaction },
     );
 
-    const noti_c = await db.Notification.create({
-      Owner_id: ship.customer_id,
-      message: `Đơn vận mới ${ship.id} chờ xử lí`,
-      linkToAction: `/Products/order/warehouse/management/order_trackking?highline=${ship.id}&openModal=false`,
-      noitfi_level: "1",
+    const shipSuffix = Math.floor(1000 + Math.random() * 9000);
+    const shipPaymentCode = `SHIPPIN${Date.now().toString().slice(-6)}${shipSuffix}`;
+
+    const pay = await db.payment_sessions.create(
+      {
+        ship_id: ship.id,
+        payer_id: company_id,
+        actor_pay_id: id,
+        receiver_id: ship.shipping_partner,
+        amount_expected: total_ship_price,
+        status: "pending",
+        payment_code: shipPaymentCode,
+        payment_method: payment_method,
+      },
+      { transaction },
+    );
+
+    // =========================================================================
+    // 🚀 THUẬT TOÁN ĐỈNH CAO: NHÓM BATCH THEO ĐƠN HÀNG ĐỂ GIẢI QUYẾT BÀI TOÁN CỦA ANH
+    // =========================================================================
+    const orderGroups = {};
+    batches.forEach((batch) => {
+      const ownerId = batch.Order_owner;
+      if (ownerId) {
+        if (!orderGroups[ownerId]) {
+          orderGroups[ownerId] = { total_price: 0, batches: [] };
+        }
+        orderGroups[ownerId].total_price += parseFloat(batch.total_price || 0);
+        orderGroups[ownerId].batches.push(batch);
+      }
     });
 
-    const noti_s = await db.Notification.create({
-      Owner_id: ship.shipping_partner,
-      message: `Đơn vận mới ${ship.id} chờ xử lí`,
-      linkToAction: `/Products/order/warehouse/management/order_trackking?highline=${ship.id}&openModal=false`,
-      noitfi_level: "1",
-    });
+    let allShipOrderPaid = true;
+    let hasAnyPaidOrder = false;
 
-    await NotificationService.sendSmartNotification(
-      noti_s?.id,
-      ship.shipping_partner,
-      "manufacturer",
-      `Đơn vận mới ${ship.id} chờ xử lí`,
-      [],
-      "delivery",
-      `level_1`,
-      `/Products/order/warehouse/management/order_trackking?highline=${ship.id}&openModal=false`,
+    // Duyệt qua từng nhóm Đơn đặt hàng có trên xe
+    for (const [masterOrderId, groupData] of Object.entries(orderGroups)) {
+      if (groupData.total_price <= 0) continue;
+
+      let initialSessionStatus = "pending";
+      let initialSessionActual = 0;
+
+      const pinnedOrder = await db.Pinned_Products.findByPk(masterOrderId, {
+        transaction,
+      });
+      if (pinnedOrder) {
+        // Kiểm tra trạng thái tài chính từ Pinned_Products như anh yêu cầu
+        if (pinnedOrder.payment_status === "complated") {
+          initialSessionStatus = "paid";
+          initialSessionActual = groupData.total_price;
+          hasAnyPaidOrder = true;
+        } else {
+          allShipOrderPaid = false;
+        }
+      } else {
+        allShipOrderPaid = false;
+      }
+
+      // Sinh 1 mã QR (payment_session) riêng biệt cho TỪNG nhóm đơn hàng trên xe
+      const productSuffix = Math.floor(1000 + Math.random() * 9000);
+      const productPaymentCode = `ORDERPIN${Date.now().toString().slice(-6)}${productSuffix}`;
+
+      await db.payment_sessions.create(
+        {
+          order_id: masterOrderId,
+          ship_id: ship.id,
+          payer_id: partnerId,
+          receiver_id: company_id,
+          amount_expected: groupData.total_price,
+          amount_actual: initialSessionActual,
+          status: initialSessionStatus,
+          payment_code: productPaymentCode,
+          payment_method: "prepaid",
+        },
+        { transaction },
+      );
+    }
+
+    // Cập nhật lại trạng thái payment_status ban đầu cho shipping_order
+    let finalShipPaymentStatus = "unpaid";
+    if (allShipOrderPaid) finalShipPaymentStatus = "complated";
+    else if (hasAnyPaidOrder) finalShipPaymentStatus = "partially_paid";
+
+    await ship.update(
+      { payment_status: finalShipPaymentStatus },
+      { transaction },
     );
-    await NotificationService.sendSmartNotification(
-      noti_c?.id,
-      ship.customer_id,
-      "manufacturer",
-      `Đơn vận mới ${ship.id} chờ xử lí`,
-      [],
-      "delivery",
-      `level_1`,
-      `/Products/order/warehouse/management/order_trackking?highline=${ship.id}&openModal=false`,
+    // =========================================================================
+
+    if (payment_method === "cod") {
+      const noti_s = await db.Notification.create(
+        {
+          Owner_id: ship.customer_id,
+          message: `Yêu cầu nhận đơn ${ship.id} chờ xử lí`,
+          linkToAction: `/Products/order/warehouse/management/order_trackking?highline=${ship.id}&openModal=false`,
+          noitfi_level: "3",
+        },
+        { transaction },
+      );
+
+      if (typeof NotificationService !== "undefined") {
+        await NotificationService.sendSmartNotification(
+          noti_s?.id,
+          ship.customer_id,
+          "manufacturer",
+          `Yêu cầu nhận đơn ${ship.id} chờ xử lí`,
+          [],
+          "delivery",
+          `level_3`,
+          `/Products/order/warehouse/management/order_trackking?highline=${ship.id}&openModal=false`,
+        );
+      }
+    }
+
+    const noti_trans = await db.Notification.create(
+      {
+        Owner_id: ship.shipping_partner,
+        message: `Đơn vận mới ${ship.id} chờ xử lí`,
+        linkToAction: `/Products/order/warehouse/management/order_trackking?highline=${ship.id}&openModal=false`,
+        noitfi_level: "3",
+      },
+      { transaction },
     );
+
+    if (typeof NotificationService !== "undefined") {
+      await NotificationService.sendSmartNotification(
+        noti_trans?.id,
+        ship.shipping_partner,
+        "manufacturer",
+        `Đơn vận mới ${ship.id} chờ xử lí`,
+        [],
+        "delivery",
+        `level_3`,
+        `/Products/order/warehouse/management/order_trackking?highline=${ship.id}&openModal=false`,
+      );
+    }
 
     await transaction.commit();
 
     return res.status(200).json({
       RM: "Đã tạo vận đơn thành công!",
       RC: 200,
-      RD: { orderId },
+      RD: { orderId, pay },
     });
   } catch (error) {
     if (transaction) await transaction.rollback();
@@ -4137,14 +4689,50 @@ const sendRequestShiping = (db) => async (req, res) => {
       .json({ RM: "Lỗi hệ thống khi xử lý vận đơn!", RC: 500 });
   }
 };
+
 const getShipingProccess = (db) => async (req, res) => {
   try {
     const { company_id, role } = req?.user;
+    const whereCondition = { sender_id: company_id };
+
+    if (role.toUpperCase() === "DISTRIBUTOR") {
+      whereCondition.payment_status = "complated";
+    }
 
     const defaultInclude = [
       {
+        model: db.payment_sessions,
+        as: "Ship_pay_bill",
+        where: {
+          payment_code: { [db.Sequelize.Op.like]: "SHIPPIN%" },
+        },
+        required: false,
+      },
+      {
         model: db.product_batch,
         as: "batches",
+        include: [
+          {
+            model: db.Pinned_Products,
+            as: "Pinned_order",
+            required: false,
+            attributes: [
+              "id",
+              "total_price",
+              "payment_method",
+              "debt",
+              "payment_status",
+              "payment_code",
+            ],
+            include: [
+              {
+                model: db.payment_sessions,
+                as: "bills",
+                required: false,
+              },
+            ],
+          },
+        ],
       },
       {
         model: db.Vehicle,
@@ -4167,8 +4755,9 @@ const getShipingProccess = (db) => async (req, res) => {
         ],
       },
     ];
+
     const rawShippingProcess = await db.shipping_order.findAll({
-      where: { sender_id: company_id },
+      where: whereCondition,
       include: defaultInclude,
       order: [["createdAt", "DESC"]],
     });
@@ -4188,10 +4777,13 @@ const getShipingProccess = (db) => async (req, res) => {
       if (!orders || orders.length === 0) return [];
 
       const allIds = new Set();
+      const shipIds = [];
+
       orders.forEach((o) => {
         if (o.sender_id) allIds.add(o.sender_id);
         if (o.customer_id) allIds.add(o.customer_id);
         if (o.shipping_partner) allIds.add(o.shipping_partner);
+        shipIds.push(o.id);
       });
       const idList = Array.from(allIds);
 
@@ -4203,7 +4795,7 @@ const getShipingProccess = (db) => async (req, res) => {
         "status",
       ];
 
-      const [mans, dists, rets, trans] = await Promise.all([
+      const [mans, dists, rets, trans, allProductSessions] = await Promise.all([
         db.Manufacturer.findAll({
           where: { id: idList },
           attributes: extraAttributes,
@@ -4220,6 +4812,13 @@ const getShipingProccess = (db) => async (req, res) => {
           where: { id: idList },
           attributes: extraAttributes,
         }),
+        db.payment_sessions.findAll({
+          where: {
+            ship_id: shipIds,
+            payment_code: { [db.Sequelize.Op.like]: "ORDERPIN%" },
+          },
+          Russo: (t) => t,
+        }),
       ]);
 
       const partnerMap = new Map();
@@ -4233,8 +4832,68 @@ const getShipingProccess = (db) => async (req, res) => {
         });
       });
 
+      const sessionsByShipMap = new Map();
+      allProductSessions.forEach((s) => {
+        const sessionJson = s.toJSON();
+        if (!sessionsByShipMap.has(sessionJson.ship_id)) {
+          sessionsByShipMap.set(sessionJson.ship_id, []);
+        }
+        sessionsByShipMap.get(sessionJson.ship_id).push(sessionJson);
+      });
+
       return orders.map((o) => {
         const order = o.toJSON();
+
+        const currentShipSessions = sessionsByShipMap.get(order.id) || [];
+
+        let total_expected = 0;
+        let total_actual_paid = 0;
+        let amount_remaining = 0;
+        let is_all_cleared = true;
+        let product_bills = [];
+
+        if (currentShipSessions.length > 0) {
+          currentShipSessions.forEach((s) => {
+            const exp = Number(s.amount_expected || 0);
+            const act = Number(s.amount_actual || 0);
+            const isPaid = ["paid", "completed", "complated"].includes(
+              s.status,
+            );
+
+            total_expected += exp;
+            total_actual_paid += act;
+            amount_remaining = Math.max(0, exp - act);
+            if (!isPaid) is_all_cleared = false;
+
+            product_bills.push({
+              id: s.id,
+              order_id: s.order_id,
+              payment_code: s.payment_code,
+              amount_expected: exp,
+              amount_actual: act,
+              status: s.status,
+              payment_method: s.payment_method,
+            });
+          });
+        } else {
+          is_all_cleared = ["complated", "completed", "paid"].includes(
+            order.payment_status,
+          );
+          total_expected = Number(order.product_total_price || 0);
+          total_actual_paid = is_all_cleared ? total_expected : 0;
+
+          product_bills.push({
+            id: null,
+            order_id: null,
+            payment_code: `LOST_PIN_${order.id.substring(0, 6)}`,
+            amount_expected: total_expected,
+            amount_remaining: amount_remaining,
+            amount_actual: total_actual_paid,
+            status: is_all_cleared ? "paid" : "pending",
+            payment_method: "prepaid",
+          });
+        }
+
         return {
           ...order,
           sender_data: partnerMap.get(order.sender_id) || {
@@ -4246,8 +4905,16 @@ const getShipingProccess = (db) => async (req, res) => {
           shipper_data: partnerMap.get(order.shipping_partner) || {
             company_name: "Chưa xác định",
           },
-          // THÊM: Gán lại trường cho dễ dùng ở Frontend
           order_vehicle: order.shipping_vehicle || [],
+
+          batches_bill_summary: {
+            product_bills: product_bills,
+            total_expected: total_expected,
+            total_actual_paid: total_actual_paid,
+            amount_remaining: amount_remaining,
+            remaining_debt: Math.max(0, total_expected - total_actual_paid),
+            is_all_cleared: is_all_cleared,
+          },
         };
       });
     };
@@ -4267,7 +4934,6 @@ const getShipingProccess = (db) => async (req, res) => {
     return res.status(500).json({ RM: "Lỗi hệ thống!", RC: 500 });
   }
 };
-
 const getTransporterPrice = (db) => async (req, res) => {
   try {
     const { company_id } = req?.user;
@@ -4388,7 +5054,7 @@ const reupdateBatch = (db) => async (req, res) => {
     };
 
     await batch.update(calculatedData);
-
+    req.ai_mapped_payload = batch.toJSON();
     return res.status(200).json({
       RM: "Cập nhật thông số lô hàng thành công!",
       RC: 200,
@@ -4491,6 +5157,7 @@ const fetchFleetValidApi = (db) => async (req, res) => {
     });
   }
 };
+
 const TransAcceptShip = (db) => async (req, res) => {
   const t = await db.sequelize.transaction();
   try {
@@ -4682,6 +5349,7 @@ const PindDriver = (db) => async (req, res) => {
     return res.status(500).json({ RM: "Lỗi hệ thống!", RC: 500 });
   }
 };
+
 const disAcceptShippingOrderApi = (db) => async (req, res) => {
   let t;
   try {
@@ -4689,11 +5357,10 @@ const disAcceptShippingOrderApi = (db) => async (req, res) => {
     const { company_id } = req.user;
     const { shipping_id } = req.params;
 
-    // Thêm timeout cho query để không bị treo vô hạn
     const order = await db.shipping_order.findOne({
       where: { id: shipping_id, customer_id: company_id },
       transaction: t,
-      lock: t.LOCK.UPDATE, // Khóa hàng này lại để tránh thằng khác chọc vào
+      lock: t.LOCK.UPDATE,
     });
 
     if (!order) {
@@ -4701,9 +5368,6 @@ const disAcceptShippingOrderApi = (db) => async (req, res) => {
       return res.status(400).json({ RM: "Không tìm thấy!", RC: 400 });
     }
 
-    console.log(">>> [BEFORE UPDATE]: Chuẩn bị update order...");
-
-    // Dùng Promise.race để bắt trường hợp query bị treo quá lâu
     await Promise.race([
       order.update(
         { receiver_confirm: "accepted", status: "proposed" },
@@ -4714,14 +5378,10 @@ const disAcceptShippingOrderApi = (db) => async (req, res) => {
       ),
     ]);
 
-    console.log(">>> [AFTER UPDATE]: Update xong rồi!");
-
     await t.commit();
     return res.status(200).json({ RM: "Xác nhận thành công!", RC: 200 });
   } catch (error) {
-    console.log(">>> [CATCH BLOCK]: Đã bắt được lỗi nè anh Trung!");
     if (t) {
-      console.log(">>> Đang thực hiện Rollback...");
       await t.rollback();
     }
     console.error("!!! Chi tiết lỗi:", error.message);
@@ -5118,10 +5778,27 @@ const senderReadyTopick = (db) => async (req, res) => {
       });
     }
 
+    const batches = await db.product_batch.findAll({
+      where: { shipping_order_id: shipping_id },
+      attributes: ["id"],
+      transaction: t,
+    });
+
+    const batchIds = batches.map((b) => b.id);
+
+    if (batchIds.length === 0) {
+      await t.rollback();
+      return res.status(400).json({
+        RM: "Đơn vận chuyển không chứa kiện hàng nào để xác thực xuất kho!",
+        RC: 400,
+      });
+    }
+
     const allQr = await db.QrRegistry.findAll({
       where: {
-        target_id: shipping_id,
+        target_batch: batchIds,
       },
+      transaction: t,
     });
 
     const hasInvalidQR = allQr.some(
@@ -5161,24 +5838,29 @@ const senderReadyTopick = (db) => async (req, res) => {
       transaction: t,
     });
 
-    const noti = await db.Notification.create({
-      Owner_id: order.shipping_partner,
-      target_actor: allDriver.map((v) => v.Driver?.id).filter((id) => id),
-      message: `Đơn vận ${order.id} đã sẵn sàng để lấy hàng.`,
-      linkToAction: `/Products/order/warehouse/management/order_trackking?highline=${order.id}&openModal=true`,
-      noitfi_level: "1",
-    });
-
-    await NotificationService.sendSmartNotification(
-      noti?.id,
-      order.shipping_partner,
-      "manufacturer",
-      `Đơn vận ${order.id} đã sẵn sàng để lấy hàng.`,
-      allDriver.map((v) => v.Driver?.id).filter((id) => id),
-      "order_ready",
-      `level_1`,
-      `/Products/order/warehouse/management/order_trackking?highline=${order.id}&openModal=true`,
+    const noti = await db.Notification.create(
+      {
+        Owner_id: order.shipping_partner,
+        target_actor: allDriver.map((v) => v.Driver?.id).filter((id) => id),
+        message: `Đơn vận ${order.id} đã sẵn sàng để lấy hàng.`,
+        linkToAction: `/Products/order/warehouse/management/order_trackking?highline=${order.id}&openModal=true`,
+        noitfi_level: "1",
+      },
+      { transaction: t },
     );
+
+    if (typeof NotificationService !== "undefined") {
+      await NotificationService.sendSmartNotification(
+        noti?.id,
+        order.shipping_partner,
+        "manufacturer",
+        `Đơn vận ${order.id} đã sẵn sàng để lấy hàng.`,
+        allDriver.map((v) => v.Driver?.id).filter((id) => id),
+        "order_ready",
+        `level_1`,
+        `/Products/order/warehouse/management/order_trackking?highline=${order.id}&openModal=true`,
+      );
+    }
 
     await t.commit();
 
@@ -5188,7 +5870,7 @@ const senderReadyTopick = (db) => async (req, res) => {
     });
   } catch (error) {
     if (t) await t.rollback();
-    console.error("!!! Error at disAcceptShippingOrderApi:", error);
+    console.error("!!! Error at senderReadyTopick:", error);
     return res.status(500).json({
       RM: "Lỗi hệ thống khi xác nhận vận đơn!",
       RC: 500,
@@ -5277,6 +5959,12 @@ const AcceptAndSignOrder = (db) => async (req, res) => {
 
       const order = await db.shipping_order.findOne({
         where: { id: order_id, customer_id: company_id },
+        include: [
+          {
+            model: db.Vehicle,
+            as: "shipping_vehicle",
+          },
+        ],
         transaction: t,
       });
 
@@ -5325,8 +6013,8 @@ const AcceptAndSignOrder = (db) => async (req, res) => {
         repair_product: "batch_fixed",
         confirm_delivery: "delivered",
       };
-      const newStatus = statusMap[inspection_type] || order.status;
 
+      const newStatus = statusMap[inspection_type] || order.status;
       const reportId = `REP_${timestamp}`;
       await db.InspectionReports.create(
         {
@@ -5355,8 +6043,19 @@ const AcceptAndSignOrder = (db) => async (req, res) => {
         { transaction: t },
       );
 
+      await db.Vehicle.update(
+        {
+          status: "available",
+          order_now: null,
+        },
+        {
+          where: { order_now: order.id },
+          transaction: t,
+        },
+      );
+
       const notifyMsg = `Đơn vận ${order.id} ${
-        newStatus === "completed"
+        newStatus === "delivered"
           ? "đã hoàn thành"
           : newStatus === "return"
             ? "cần trả lại"
@@ -5395,21 +6094,23 @@ const AcceptAndSignOrder = (db) => async (req, res) => {
         { transaction: t },
       );
 
-      await NotificationService.sendSmartNotification(
-        noti_c?.id,
-        order.customer_id,
-        "customer",
-        notifyMsg,
-        [],
-        "order_completed",
-        "level_4",
-        `/Products/order/warehouse/management/order_trackking?highline=${order.id}&openModal=true`,
-      );
+      if (typeof NotificationService !== "undefined") {
+        await NotificationService.sendSmartNotification(
+          noti_c?.id,
+          order.customer_id,
+          "customer",
+          notifyMsg,
+          [],
+          "order_completed",
+          "level_4",
+          `/Products/order/warehouse/management/order_trackking?highline=${order.id}&openModal=true`,
+        );
+      }
 
       await t.commit();
       return res.status(200).json({
         RC: 200,
-        RM: "Xác nhận và ký số thành công!",
+        RM: "Xác nhận và ký số thành công, đội xe đã được giải phóng!",
         RD: { report_id: reportId },
       });
     } catch (error) {
@@ -5417,7 +6118,6 @@ const AcceptAndSignOrder = (db) => async (req, res) => {
       for (const filePath of filesCreated) {
         try {
           await fs.unlink(filePath);
-          console.log(`>>> [ROLLBACK] Deleted: ${filePath}`);
         } catch (unlinkErr) {
           console.error(
             `>>> [CRITICAL] Rollback file failed: ${filePath}`,
@@ -5679,9 +6379,816 @@ const ArrivedShip = (db) => async (req, res) => {
   }
 };
 
+const ProductTrace = (db, nodes) => async (product_master, metadata) => {
+  try {
+    if (!product_master || !metadata)
+      return { RM: "Thiếu dữ liệu sản phẩm hoặc phiên bản!", RC: 400 };
+
+    const raw = [
+      String(metadata.id || "").trim(),
+      String(product_master.id || "").trim(),
+      String(metadata.version || "1").trim(),
+      String(product_master.author || "")
+        .normalize("NFC")
+        .trim(),
+      String(metadata.responsible_person || "")
+        .normalize("NFC")
+        .trim(),
+      String(metadata.price || "").trim(),
+    ].join("|");
+
+    const product_hash = crypto.createHash("sha256").update(raw).digest("hex");
+
+    if (product_hash !== metadata.txt_hash) {
+      console.warn(
+        `[Trace] Lệch Hash! DB: ${metadata.txt_hash} !== Calc: ${product_hash}`,
+      );
+      return { RM: "Block không hợp lệ (Dữ liệu đã bị sửa đổi)!", RC: 400 };
+    }
+
+    const payload = {
+      timestamp: String(Date.now()),
+      payload: {
+        product_id: product_master.id,
+        type: "product_create",
+        hash: product_hash,
+        version: `${metadata.version}`,
+        Owner_id: product_master.author,
+        original_value: raw,
+        status: "active",
+        detail: "none",
+      },
+    };
+
+    const commitResp = await pair_validate.pair_request(
+      db,
+      payload,
+      nodes,
+      "product_trace",
+    );
+
+    console.log(
+      "\n[DEBUG ProductTrace] commitResp trả về:",
+      JSON.stringify(commitResp, null, 2),
+    );
+
+    if (commitResp.RC === 200) {
+      return { RM: "Block hợp lệ!", RC: 200 };
+    } else {
+      return { RM: "Block không hợp lệ trên Chain!", RC: 201 };
+    }
+  } catch (error) {
+    console.error("ProductTrace error:", error);
+    return { RM: "Lỗi hệ thống!", RC: 500 };
+  }
+};
+
+const CompanyTrace = (db, nodes) => async (company) => {
+  try {
+    if (!company)
+      return {
+        RM: "Thiếu dữ liệu company!",
+        RC: 400,
+      };
+    const c_id = String(company.id || "").trim();
+    const c_name = String(company.company_name || "")
+      .normalize("NFC")
+      .trim();
+    const c_tax = String(company.tax_code || "no_tax")
+      .normalize("NFC")
+      .trim();
+    const c_license = String(company.license_number || "no_license")
+      .normalize("NFC")
+      .trim();
+    const raw = `${c_id}|${c_name}|${c_license}|${c_tax}`;
+
+    const company_hash = crypto.createHash("sha256").update(raw).digest("hex");
+
+    if (company_hash != company.txt_hash) {
+      return { RM: "Block không hợp lệ!", RC: 400 };
+    }
+
+    const payload = {
+      timestamp: String(Date.now()),
+      payload: {
+        product_id: company.id,
+        type: "company_onboarding",
+        hash: company_hash,
+        version: "1.0.0",
+        Owner_id: company.actor_id,
+        original_value: raw,
+        detail: "on chain company/store",
+        status: "active",
+      },
+    };
+
+    const commitResp = await pair_validate.pair_request(
+      db,
+      payload,
+      nodes,
+      "company_trace",
+    );
+
+    if (commitResp.RC === 200) {
+      return { RM: "Xác thực Company hợp lệ!", RC: 200 };
+    } else {
+      return { RM: "Company bị từ chối!", RC: 201 };
+    }
+  } catch (error) {
+    console.error(error);
+    return { RM: "Lỗi hệ thống!", RC: 500 };
+  }
+};
+
+const BatchTrace = (db, nodes) => async (batch) => {
+  try {
+    if (!batch)
+      return {
+        RM: "Thiếu dữ liệu!",
+        RC: 400,
+      };
+
+    const raw = [
+      String(batch.id || "").trim(),
+      String(batch.product_id || "").trim(),
+      String(batch.QC_Pass ?? "0").trim(),
+      String(batch.QC_Failed ?? "0").trim(),
+      String(batch.qc_manager_id || "")
+        .normalize("NFC")
+        .trim(),
+    ].join("|");
+    const batch_hash = crypto.createHash("sha256").update(raw).digest("hex");
+
+    if (batch_hash != batch.txt_hash) {
+      return { RM: "Block không hợp lệ!", RC: 400 };
+    }
+
+    const payload = {
+      timestamp: String(Date.now()),
+      payload: {
+        product_id: batch.id,
+        type: "Batch_complate",
+        hash: batch_hash,
+        version: "1.0.2",
+        Owner_id: batch.author,
+        original_value: raw,
+        detail: `Batch: ${batch.batch_name} | Pass: ${batch.QC_Pass} | Fail: ${batch.QC_Failed}`,
+        status: "active",
+      },
+    };
+
+    const commitResp = await pair_validate.pair_request(
+      db,
+      payload,
+      nodes,
+      "batch_trace",
+    );
+
+    if (commitResp.RC === 200) {
+      return {
+        RM: "Block hợp lệ!",
+        RC: 200,
+      };
+    } else {
+      return {
+        RM: "Block không hợp lệ!",
+        RC: 201,
+      };
+    }
+  } catch (error) {
+    console.error(error);
+    return {
+      RM: "Lỗi hệ thống!",
+      RC: 500,
+    };
+  }
+};
+
+const ShipTrace = (db, nodes) => async (order, traceType) => {
+  try {
+    if (!order) {
+      return { RM: "Thiếu dữ liệu đơn hàng!", RC: 400 };
+    }
+
+    let historyStatus = "";
+    let historyOldOnchainStatus = "";
+    let txt_hash = "";
+    switch (traceType) {
+      case "Shipping_Agreement":
+        historyStatus = "proposed";
+        txt_hash = "hash_agreement";
+        historyOldOnchainStatus = "agreement_pending";
+        break;
+
+      case "Shipping_In_Transit":
+        historyStatus = "shipping";
+        txt_hash = "hash_transit";
+        historyOldOnchainStatus = "agreement_hashed";
+        break;
+
+      case "Shipping_Delivered":
+        historyStatus = "delivered";
+        txt_hash = "hash_delivered";
+        historyOldOnchainStatus = "pickup_verified";
+        break;
+
+      default:
+        return { RM: "Loại Trace (traceType) không hợp lệ!", RC: 400 };
+    }
+
+    const batchIds = order.batches?.map((b) => b.id).join(",") || "no_batch";
+
+    const raw = [
+      String(order.id || "").trim(),
+      String(historyStatus || "").trim(),
+      String(historyOldOnchainStatus || "").trim(),
+      String(batchIds || "").trim(),
+      String(order.total_ship_price ?? "0").trim(),
+      String(order.total_quantity ?? "0").trim(),
+      String(order.product_total_price ?? "0").trim(),
+      String(order.sender_id || "").trim(),
+      String(order.customer_id || "").trim(),
+      String(order.shipping_partner || "")
+        .normalize("NFC")
+        .trim(),
+    ].join("|");
+
+    // Tạo Hash
+    const order_hash = crypto.createHash("sha256").update(raw).digest("hex");
+
+    if (order_hash != order[txt_hash]) {
+      return { RM: "Block không hợp lệ!", RC: 400 };
+    }
+    const Owner_id = `${order.sender_id}|${order?.customer_id}|${order?.shipping_partner}`;
+
+    const payload = {
+      timestamp: String(Date.now()),
+      payload: {
+        product_id: order.id,
+        type: traceType,
+        hash: order_hash,
+        version: "1.0.1",
+        Owner_id: Owner_id,
+        original_value: raw,
+        status: "active",
+      },
+    };
+
+    const commitResp = await pair_validate.pair_request(
+      db,
+      payload,
+      nodes,
+      "ship_trace",
+    );
+
+    if (commitResp.RC === 200) {
+      return {
+        RM: "Block hợp lệ!",
+        RC: 200,
+      };
+    } else {
+      return {
+        RM: "Block không hợp lệ!",
+        RC: 201,
+      };
+    }
+  } catch (error) {
+    console.error("[ShipTrace Error]", error);
+    return {
+      RM: "Lỗi hệ thống khi Trace!",
+      RC: 500,
+    };
+  }
+};
+
+const ProductionTraceLine = (db, nodes) => async (req, res) => {
+  try {
+    const { batch_id } = req?.params;
+    if (!batch_id) {
+      return res.status(400).json({ RC: 400, RM: "Thiếu dữ liệu định danh!" });
+    }
+
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.flushHeaders();
+
+    const send = (data) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    const timeline = [];
+    let stepCount = 1;
+    const involvedCompanyIds = [];
+
+    send({
+      step: 1,
+      progress: 10,
+      msg: "Đang trích xuất dữ liệu Lô hàng & Sản phẩm...",
+    });
+
+    const batch = await db.product_batch.findOne({
+      where: { id: batch_id },
+      include: [
+        { model: db.Product, as: "product" },
+        { model: db.Product_Metadata, as: "product_version" },
+        { model: db.Manufacturer, as: "Manufacture_manager" },
+      ],
+    });
+
+    if (!batch || !batch.product || !batch.product_version) {
+      send({
+        step: -1,
+        progress: 0,
+        msg: "Không tìm thấy thông tin lô hàng hoặc sản phẩm bị lỗi dữ liệu!",
+        error: true,
+      });
+      return res.end();
+    }
+
+    const product_master = batch.product;
+    const product_metadata = batch.product_version;
+
+    involvedCompanyIds.push(product_master.author, batch.qc_manager_id);
+
+    const shipping_order = await db.shipping_order.findOne({
+      include: [
+        {
+          model: db.product_batch,
+          as: "batches",
+          where: { id: batch_id },
+          attributes: ["id"],
+        },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+
+    send({
+      step: 2,
+      progress: 30,
+      msg: "Đang xác thực thông tin Sản phẩm trên Blockchain...",
+    });
+
+    const prodTrace = await ProductTrace(db, nodes)(
+      product_master,
+      product_metadata,
+    );
+    timeline.push({
+      step: stepCount++,
+      type: "product_create",
+      title: "Hồ sơ sản phẩm gốc",
+      detail: `Mã SP: ${product_master.id}`,
+      author_id: product_master.author,
+      is_verified_onchain: prodTrace.RC === 200,
+      timestamp: product_master.createdAt,
+    });
+
+    send({
+      step: 3,
+      progress: 50,
+      msg: "Đang kiểm tra tính toàn vẹn của Lô hàng (QC)...",
+    });
+    const bTrace = await BatchTrace(db, nodes)(batch);
+    timeline.push({
+      step: stepCount++,
+      type: "Batch_complate",
+      title: "Đóng gói & Kiểm định",
+      detail: `Lô: ${batch.batch_name} | Pass: ${batch.QC_Pass} | Fail: ${batch.QC_Failed}`,
+      author_id: batch.qc_manager_id,
+      is_verified_onchain: bTrace.RC === 200,
+      timestamp: batch.createdAt,
+    });
+
+    if (shipping_order) {
+      involvedCompanyIds.push(
+        shipping_order.sender_id,
+        shipping_order.customer_id,
+      );
+      if (shipping_order.shipping_partner) {
+        involvedCompanyIds.push(shipping_order.shipping_partner);
+      }
+
+      send({
+        step: 4,
+        progress: 65,
+        msg: "Đang truy xuất Hành trình Vận chuyển...",
+      });
+      const currentShipStatus = shipping_order.onchain_status;
+
+      if (
+        ["agreement_hashed", "pickup_verified", "delivery_signed"].includes(
+          currentShipStatus,
+        )
+      ) {
+        const shipAgree = await ShipTrace(db, nodes)(
+          shipping_order,
+          "Shipping_Agreement",
+        );
+        timeline.push({
+          step: stepCount++,
+          type: "Shipping_Agreement",
+          title: "Khởi tạo vận đơn",
+          detail: `Đơn vị VC: ${shipping_order.shipping_partner || "Nội bộ"}`,
+          author_id: shipping_order.sender_id,
+          is_verified_onchain: shipAgree.RC === 200,
+          timestamp: shipping_order.createdAt,
+        });
+      }
+
+      if (["pickup_verified", "delivery_signed"].includes(currentShipStatus)) {
+        const shipTransit = await ShipTrace(db, nodes)(
+          shipping_order,
+          "Shipping_In_Transit",
+        );
+        timeline.push({
+          step: stepCount++,
+          type: "Shipping_In_Transit",
+          title: "Xuất kho phân phối",
+          detail: "Lô hàng đang được vận chuyển tới đại lý",
+          author_id:
+            shipping_order.shipping_partner || shipping_order.sender_id,
+          is_verified_onchain: shipTransit.RC === 200,
+          timestamp: shipping_order.updatedAt,
+        });
+      }
+
+      if (currentShipStatus === "delivery_signed") {
+        const shipDeliver = await ShipTrace(db, nodes)(
+          shipping_order,
+          "Shipping_Delivered",
+        );
+        timeline.push({
+          step: stepCount++,
+          type: "Shipping_Delivered",
+          title: "Đã tới điểm bán",
+          detail: `Đại lý nhận: ${shipping_order.customer_id}`,
+          author_id: shipping_order.customer_id,
+          is_verified_onchain: shipDeliver.RC === 200,
+          timestamp: shipping_order.updatedAt,
+        });
+      }
+    }
+
+    send({
+      step: 5,
+      progress: 85,
+      msg: "Đang xác thực danh tính các Doanh nghiệp tham gia...",
+    });
+
+    const uniqueCompanyIds = [...new Set(involvedCompanyIds.filter(Boolean))];
+    const companies_map = {};
+
+    try {
+      const mfg = await db.Manufacturer.findAll({
+        where: { id: uniqueCompanyIds },
+      });
+      const trp = await db.Transporter.findAll({
+        where: { id: uniqueCompanyIds },
+      });
+      const dst = await db.Distributor.findAll({
+        where: { id: uniqueCompanyIds },
+      });
+      const rtl = await db.Retailer.findAll({
+        where: { id: uniqueCompanyIds },
+      });
+
+      const allCompanies = [...mfg, ...trp, ...dst, ...rtl];
+
+      for (const comp of allCompanies) {
+        const companyObj = {
+          id: comp.id,
+          company_name: comp.company_name || comp.name || "Unknown",
+          license_number: comp.license_number || "no_license",
+          tax_code: comp.tax_code || "no_tax",
+          txt_hash: comp.txt_hash,
+          author: comp.id,
+        };
+
+        const cTrace = await CompanyTrace(db, nodes)(companyObj);
+
+        companies_map[comp.id] = {
+          name: companyObj.company_name,
+          logo: comp.image || comp.logo || null,
+          address: comp.Address || comp.address || "",
+          role: comp.role || "Doanh nghiệp",
+          is_verified_onchain: cTrace.RC === 200,
+        };
+      }
+    } catch (e) {
+      console.log("Cảnh báo: Lỗi khi móc thông tin cty: ", e.message);
+    }
+
+    send({
+      step: 6,
+      progress: 100,
+      msg: "Hoàn tất truy xuất chuỗi cung ứng!",
+      result: {
+        product_info: {
+          name: product_metadata.name,
+          price: product_metadata.price,
+          version: product_metadata.version,
+          author_id: product_master.author,
+        },
+        batch_info: {
+          batch_name: batch.batch_name,
+          qc_manager_id: batch.qc_manager_id,
+          qc_pass: batch.QC_Pass || 0,
+          qc_fail: batch.QC_Failed || 0,
+        },
+        companies_info: companies_map,
+        timeline: timeline,
+      },
+    });
+
+    res.end();
+  } catch (error) {
+    console.error("!!! Error at ProductionTraceLine SSE:", error);
+    res.write(
+      `data: ${JSON.stringify({ step: -1, progress: 0, msg: "Lỗi hệ thống khi quét mã QR", error: error.message })}\n\n`,
+    );
+    res.end();
+  }
+};
+
+const getAdminCompanyInfo = (db) => async (req, res) => {
+  try {
+    const { type } = req.params;
+    let { status, page = 1, limit = 10 } = req.params;
+
+    if (!type || !db[type]) {
+      return res
+        .status(400)
+        .json({ RC: -203, RM: "Loại doanh nghiệp không hợp lệ!" });
+    }
+
+    page = parseInt(page);
+    limit = parseInt(limit);
+    const offset = (page - 1) * limit;
+
+    const companyData = await db[type].findAndCountAll({
+      where: {
+        status: status,
+      },
+      limit: limit,
+      offset: offset,
+      order: [["createdAt", "DESC"]],
+    });
+
+    return res.status(200).json({
+      RC: 200,
+      RM: "Lấy dữ liệu thành công",
+      RD: {
+        list: companyData.rows,
+        total: companyData.count,
+        totalPages: Math.ceil(companyData.count / limit),
+        currentPage: page,
+      },
+    });
+  } catch (error) {
+    console.error(">>> [getAdminCompanyInfo ERR]:", error);
+    return res.status(500).json({ RC: -500, RM: "Lỗi hệ thống máy chủ" });
+  }
+};
+
+const approveCompany = (db) => async (req, res) => {
+  try {
+    const { type, company_id } = req.body;
+
+    if (!type || !company_id || !db[type]) {
+      return res.status(400).json({ RC: -400, RM: "Thiếu dữ liệu duyệt" });
+    }
+
+    await db[type].update({ status: "active" }, { where: { id: company_id } });
+
+    return res
+      .status(200)
+      .json({ RC: 200, RM: "Duyệt doanh nghiệp thành công!" });
+  } catch (error) {
+    return res.status(500).json({ RC: -500, RM: "Lỗi hệ thống" });
+  }
+};
+
+const changeStatusCompany = (db) => async (req, res) => {
+  try {
+    const { type, company_id, status } = req?.body || {};
+
+    if (!type || !company_id || !status) {
+      return res.status(400).json({
+        RC: -203,
+        RM: "Thiếu thông tin bắt buộc để thực hiện (type, company_id, status)!",
+      });
+    }
+
+    if (!db[type]) {
+      return res.status(400).json({
+        RC: -400,
+        RM: "Loại hình doanh nghiệp (Model Type) không tồn tại trên hệ thống!",
+      });
+    }
+
+    const company = await db[type].findByPk(company_id);
+    if (!company) {
+      return res.status(404).json({
+        RC: -404,
+        RM: "Không tìm thấy thông tin doanh nghiệp yêu cầu đổi trạng thái!",
+      });
+    }
+
+    const updatePayload = { status: status };
+
+    await company.update(updatePayload);
+
+    return res.status(200).json({
+      RC: 200,
+      RM: `Cập nhật trạng thái doanh nghiệp sang '${status}' thành công!`,
+    });
+  } catch (error) {
+    console.error(">>> [API changeStatusCompany CRASH ERR]:", error);
+    return res.status(500).json({
+      RC: -500,
+      RM: "Lỗi hệ thống máy chủ khi thực hiện thay đổi trạng thái doanh nghiệp!",
+    });
+  }
+};
+
+const getekycWallet = (db) => async (req, res) => {
+  try {
+    let { page = 1, limit = 10 } = req.params;
+    page = parseInt(page);
+    limit = parseInt(limit);
+    const offset = (page - 1) * limit;
+    const { Op } = db.Sequelize;
+
+    const walletData = await db.Company_Wallets.findAndCountAll({
+      where: {
+        is_verified: false,
+        wallet_kyc: { [Op.ne]: null },
+      },
+      limit: limit,
+      offset: offset,
+      order: [["updatedAt", "DESC"]],
+
+      include: [
+        { model: db.Manufacturer, as: "company_m", required: false },
+        { model: db.Distributor, as: "company_d", required: false },
+        { model: db.Retailer, as: "company_r", required: false },
+        { model: db.Transporter, as: "company_t", required: false },
+      ],
+    });
+
+    const flattenedList = walletData.rows.map((wallet) => {
+      let companyInfo = null;
+      let companyType = "Unknown";
+
+      if (wallet.company_m) {
+        companyInfo = wallet.company_m;
+        companyType = "Manufacturer";
+      } else if (wallet.company_d) {
+        companyInfo = wallet.company_d;
+        companyType = "Distributor";
+      } else if (wallet.company_r) {
+        companyInfo = wallet.company_r;
+        companyType = "Retailer";
+      } else if (wallet.company_t) {
+        companyInfo = wallet.company_t;
+        companyType = "Transporter";
+      }
+
+      return {
+        wallet_id: wallet.id,
+        company_id: wallet.company_id,
+        bank_code: wallet.bank_code,
+        account_number: wallet.account_number,
+        account_name: wallet.account_name,
+        balance: parseFloat(wallet.balance || 0),
+        status: wallet.status,
+        wallet_kyc: wallet.wallet_kyc,
+        updatedAt: wallet.updatedAt,
+
+        company_type: companyType,
+        company_name: companyInfo ? companyInfo.company_name : "N/A",
+        license_number: companyInfo ? companyInfo.license_number : "N/A",
+        contact_person: companyInfo ? companyInfo.contact_person : "N/A",
+        contact_phone: companyInfo
+          ? companyInfo.contact_phone || companyInfo.contact_number
+          : "N/A",
+        logo: companyInfo ? companyInfo.logo : null,
+      };
+    });
+
+    return res.status(200).json({
+      RC: 200,
+      RM: "Lấy danh sách hàng chờ duyệt eKYC Ví thành công!",
+      RD: {
+        list: flattenedList,
+        total: walletData.count,
+        totalPages: Math.ceil(walletData.count / limit),
+        currentPage: page,
+      },
+    });
+  } catch (error) {
+    console.error(">>> [API getekycWallet CRASH ERROR]:", error);
+    return res.status(500).json({
+      RC: -500,
+      RM: "Lỗi hệ thống máy chủ khi tải danh sách eKYC!",
+    });
+  }
+};
+
+const verify_company_wallet = (db) => async (req, res) => {
+  try {
+    const { wallet_id, actionType, reject_reason } = req?.body || {};
+
+    if (!wallet_id || !actionType) {
+      return res.status(400).json({
+        RC: -203,
+        RM: "Thiếu thông tin xử lý (wallet_id hoặc hành động duyệt actionType)!",
+      });
+    }
+
+    const wallet = await db.Company_Wallets.findByPk(wallet_id);
+    if (!wallet) {
+      return res.status(404).json({
+        RC: -404,
+        RM: "Không tìm thấy thông tin tài khoản ví yêu cầu phê duyệt!",
+      });
+    }
+
+    if (actionType === "approve") {
+      await wallet.update({
+        is_verified: true,
+        status: "active",
+        reject_resson: null,
+      });
+
+      return res.status(200).json({
+        RC: 200,
+        RM: "Đã phê duyệt chứng từ eKYC và kích hoạt tài khoản Ví thành công!",
+      });
+    } else if (actionType === "reject") {
+      const finalReason =
+        reject_reason ||
+        reject_resson ||
+        "Chứng từ xác thực không hợp lệ hoặc không rõ ràng. Vui lòng kiểm tra và tải lên lại tệp khác.";
+
+      if (wallet.wallet_kyc) {
+        try {
+          const filePath = path.join(
+            process.cwd(),
+            "src",
+            "Access",
+            "company_wallet_kyc",
+            wallet.wallet_kyc,
+          );
+
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+            console.log(
+              `>>> [REJECT CLEANUP]: Đã xóa file chứng từ bị từ chối: ${wallet.wallet_kyc}`,
+            );
+          }
+        } catch (cleanupError) {
+          console.error(
+            ">>> [REJECT CLEANUP WARN]: Không thể xóa file:",
+            cleanupError.message,
+          );
+        }
+      }
+
+      await wallet.update({
+        is_verified: false,
+        status: "reject",
+        reject_resson: finalReason,
+        wallet_kyc: null,
+      });
+
+      return res.status(200).json({
+        RC: 200,
+        RM: `Đã từ chối chứng từ eKYC thành công với lý do: "${finalReason}"!`,
+      });
+    } else {
+      return res.status(400).json({
+        RC: -400,
+        RM: "Hành động xử lý (actionType) không hợp lệ! Chỉ cho phép 'approve' hoặc 'reject'.",
+      });
+    }
+  } catch (error) {
+    console.error(">>> [API verify_company_wallet CRASH ERROR]:", error);
+    return res.status(500).json({
+      RC: -500,
+      RM: "Lỗi hệ thống máy chủ khi thực hiện phê duyệt eKYC ví!",
+    });
+  }
+};
+
 export default {
+  getekycWallet,
+  verify_company_wallet,
   AcceptAndSignOrder,
+  changeStatusCompany,
+  getAdminCompanyInfo,
   ArrivedShip,
+  ProductionTraceLine,
   getBox,
   createBox,
   StartShip,
@@ -5758,6 +7265,6 @@ export default {
   safeUnlink,
   verifyTemplateIntegrity,
   cleanupUploadedFiles,
-  getUserProductPending,
+  getUserProductList,
   create_Admin_node,
 };

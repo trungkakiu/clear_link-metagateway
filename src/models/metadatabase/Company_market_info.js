@@ -17,7 +17,6 @@ export default (sequelize, DataTypes) => {
       },
       slug: {
         type: DataTypes.STRING,
-        // unique: true,
         allowNull: false,
         comment: "Đường dẫn định danh: market/cong-ty-a",
       },

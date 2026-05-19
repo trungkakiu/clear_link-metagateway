@@ -92,6 +92,11 @@ export default (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: "pending",
       },
+      txt_hash: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "mã bảo chứng chain",
+      },
     },
     {
       tableName: "Actor_model",

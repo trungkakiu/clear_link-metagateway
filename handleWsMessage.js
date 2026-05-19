@@ -23,11 +23,11 @@ function verifySignature({ nodeId, timestamp, signature }, publicKey) {
 }
 
 async function verifyNodeHello(msg) {
-  console.log("[verifyNodeHello] input:", {
-    nodeId: msg?.nodeId,
-    timestamp: msg?.timestamp,
-    hasSignature: !!msg?.signature,
-  });
+  // console.log("[verifyNodeHello] input:", {
+  //   nodeId: msg?.nodeId,
+  //   timestamp: msg?.timestamp,
+  //   hasSignature: !!msg?.signature,
+  // });
 
   const { nodeId, timestamp, signature } = msg;
 
@@ -229,6 +229,7 @@ export const handleWsMessage =
         ws._state = "AUTHENTICATED";
 
         if (nodes.has(node.id)) {
+          console.log("DUPLICATE_NODE");
           nodes.get(node.id).close(4009, "DUPLICATE_NODE");
         }
         await nodes.set(node.id, ws);
@@ -239,6 +240,7 @@ export const handleWsMessage =
       }
 
       if (!ws._session || !ws._session.sessionId) {
+        console.log("Session expired");
         ws.close(4001, "Session expired");
         clearTimeout(handshakeTimeout);
         return;
@@ -256,6 +258,12 @@ export const handleWsMessage =
 
       switch (msg.type) {
         case "client_log": {
+          // console.log("Client_log: ", msg);
+          return;
+        }
+
+        case "client_debug": {
+          // console.log("client_debug: ", msg);
           return;
         }
 
@@ -292,13 +300,6 @@ export const handleWsMessage =
 
         case "heartbeat":
           const client_status = msg.status;
-          // console.log(
-          //   `[WS - HEARTBEAT] - [${msg.nodeId}]: ${JSON.stringify(
-          //     msg,
-          //     null,
-          //     2,
-          //   )}`,
-          // );
           if (client_status === "fork") {
             await ws.send(
               JSON.stringify({
@@ -390,9 +391,9 @@ export const handleWsMessage =
           break;
         }
         case "command_response": {
-          console.log(
-            `[WS - CMD - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(msg, null, 2)}`,
-          );
+          // console.log(
+          //   `[WS - CMD - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(msg, null, 2)}`,
+          // );
           const entry = pendingRequests.get(msg.requestId);
           if (entry) {
             clearTimeout(entry.timer);
@@ -420,11 +421,6 @@ export const handleWsMessage =
             ? round.shouldFinalize(round.votes)
             : "NO_FUNC";
 
-          console.log("DEBUG shouldFinalize check:", {
-            votesSize: round.votes.size,
-            nodesSize: nodes.size,
-            result: finalizeResult,
-          });
           if (finalizeResult === true) {
             clearTimeout(round.timeoutId);
             round.status = "FINALIZED";
@@ -439,7 +435,10 @@ export const handleWsMessage =
           break;
         }
         case "pair_user_response": {
-          console.log(`[WS - USERPAIR - RESPONSE] - [${msg.nodeId}]: ${msg}`);
+          console.log(
+            `[WS - USERPAIR - RESPONSE] - [${msg.nodeId || "UNKNOWN"}]:`,
+            JSON.stringify(msg, null, 2),
+          );
           const entry = pendingRequests.get(msg.requestId);
 
           if (!entry) {
@@ -486,14 +485,6 @@ export const handleWsMessage =
           break;
         }
         case "pair_product_response": {
-          console.log(
-            `[WS - PRODUCTPAIR - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(
-              msg,
-              null,
-              2,
-            )}`,
-          );
-
           const entry = await pendingRequests.get(msg.requestId);
 
           if (!entry) {
@@ -516,14 +507,6 @@ export const handleWsMessage =
           break;
         }
         case "pair_other_response": {
-          console.log(
-            `[WS - OTHERBLOCK - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(
-              msg,
-              null,
-              2,
-            )}`,
-          );
-
           const entry = await pendingRequests.get(msg.requestId);
 
           if (!entry) {
@@ -541,6 +524,42 @@ export const handleWsMessage =
               "WS: pendingRequests entry has no resolve()",
               msg.requestId,
               entry,
+            );
+          }
+          break;
+        }
+
+        case "Batch_trace_respone":
+        case "Product_trace_respone":
+        case "Company_trace_respone":
+        case "Ship_trace_respone": {
+          console.log(`\n[WS DEBUG] Recivier ${msg.type}`);
+          console.log(
+            `[WS DEBUG RAW] Payload nhận được:`,
+            JSON.stringify(msg, null, 2),
+          ); // IN RA ĐỂ XEM CẤU TRÚC THẬT
+
+          const entry = await pendingRequests.get(msg.requestId);
+
+          if (!entry) {
+            console.warn("WS: No resolver found for requestId:", msg.requestId);
+            break;
+          }
+
+          if (entry.timer) clearTimeout(entry.timer);
+          pendingRequests.delete(msg.requestId);
+
+          if (typeof entry.resolve === "function") {
+            // FIX: Tìm đúng cái ruột chứa "ok: true" và "block"
+            // Nó có thể nằm ở msg.payload, msg.data, msg.result hoặc nằm luôn ở msg
+            const actualData = msg.payload || msg.data || msg.result || msg;
+
+            // Đảm bảo Nhạc trưởng nhận được đúng format
+            entry.resolve(actualData);
+          } else {
+            console.error(
+              "WS: pendingRequests entry has no resolve()",
+              msg.requestId,
             );
           }
           break;
@@ -582,6 +601,7 @@ export const handleWsMessage =
 
           break;
         }
+
         case "archor_block_fork": {
           console.log(`[WS - ARCHORBLOCK] - [${msg.nodeId}]: ${msg}`);
           const current_peer = await db.peer_map.findByPk(msg.nodeId);
@@ -624,11 +644,12 @@ export const handleWsMessage =
           }
           break;
         }
+
         case "sync_request": {
           const nodeId = msg.nodeId;
           if (!nodeId) return;
           const startedAt = Date.now();
-
+          console.log("responese");
           const current = syncingNodes.get(nodeId);
           if (current) {
             if (current.sessionId === msg.sessionId) {
@@ -720,14 +741,6 @@ export const handleWsMessage =
               limit,
             );
 
-            console.log(
-              `[WS - SYNC - BLOCKFETCH] - [${nodeId}]: ${JSON.stringify(
-                block,
-                null,
-                2,
-              )}`,
-            );
-
             if (!block) {
               await ws.send(
                 JSON.stringify({
@@ -769,6 +782,8 @@ export const handleWsMessage =
                 message: "block response",
               }),
             );
+            console.log("ĐÃ TRẢ DỮ LIỆU CHO NODE C#");
+            syncingNodes.delete(nodeId);
           } finally {
             if (Date.now() - startedAt > 30000) {
               syncingNodes.delete(nodeId);
@@ -807,6 +822,7 @@ export const handleWsMessage =
           }
           break;
         }
+
         case "fork_maintenance_response": {
           console.warn(
             `[WS - FORKMAINTENANCE - RESPONSE] - [${msg.nodeId}]: ${JSON.stringify(

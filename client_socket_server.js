@@ -54,21 +54,15 @@ wssClient.on("connection", (ws, req) => {
         );
       }
     } catch (err) {
-      console.error("[6099][MESSAGE-ERROR]:", err);
+      console.error("[MESSAGE-ERROR]:", err);
     }
   });
 
   ws.on("close", () => {
     if (ws._company_id && companyClients.has(ws._company_id)) {
       companyClients.get(ws._company_id).delete(ws);
-
-      if (companyClients.get(ws._company_id).size === 0) {
-        console.log(
-          `[6099][STATS] Company [${ws._company_id}] hiện tại không còn ai online.`,
-        );
-      }
     } else {
-      console.log(`[6099][CLOSE] Một kết nối chưa xác thực đã đóng.`);
+      console.log(`[CLOSE] Một kết nối chưa xác thực đã đóng.`);
     }
   });
 });
@@ -82,13 +76,12 @@ export const broadcastNotification = (
   status = "unread",
   level,
   target_actor_ids = [],
-  is_admintarget = false,
+  is_admintarget = true,
 ) => {
   const clients = companyClients.get(target_company_id);
-  console.log(target_actor_ids, is_admintarget);
   if (!clients || clients.size === 0) {
     console.log(
-      `[6099][SKIP] Không có ai online tại Company: ${target_company_id}`,
+      `[SKIP] Không có ai online tại Company: ${target_company_id}`,
     );
     return;
   }

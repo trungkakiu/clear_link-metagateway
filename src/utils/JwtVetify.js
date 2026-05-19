@@ -7,8 +7,8 @@ const limiter = rateLimit({
   max: 20,
   message: {
     RM: "Quá nhiều yêu cầu từ địa chỉ IP này, vui lòng thử lại sau 10 phút.",
-    EC: -429,
-    ED: "",
+    RC: -429,
+    RD: null,
   },
 });
 
@@ -29,8 +29,8 @@ const verifyToken = (db) => async (req, res, next) => {
     if (!authHeader) {
       return res.status(401).json({
         RM: "Vui lòng cung cấp token trong tiêu đề xác thực.",
-        EC: -401,
-        ED: "",
+        RC: -401,
+        RD: null,
       });
     }
 
@@ -39,8 +39,8 @@ const verifyToken = (db) => async (req, res, next) => {
     if (!token) {
       return res.status(401).json({
         RM: "Token không được cung cấp.",
-        EC: -401,
-        ED: "",
+        RC: -401,
+        RD: null,
       });
     }
 
@@ -51,7 +51,8 @@ const verifyToken = (db) => async (req, res, next) => {
     if (isDead != null) {
       return res.status(403).json({
         RM: "Token đã bị thu hồi (logout)",
-        EC: -403,
+        RC: -403,
+        RD: null,
       });
     }
 
@@ -64,13 +65,15 @@ const verifyToken = (db) => async (req, res, next) => {
       if (!User) {
         return res.status(403).json({
           RM: "Người dùng không hợp lệ!",
-          EC: -403,
+          RC: -403,
+          RD: null,
         });
       }
       if (decoded.session_id !== User.Session_id) {
         return res.status(403).json({
           RM: "Tài khoản đang được đăng nhập trên thiết bị khác!",
-          EC: -403,
+          RC: -403,
+          RD: null,
         });
       }
 
@@ -80,25 +83,27 @@ const verifyToken = (db) => async (req, res, next) => {
       console.error("Token verification error:", err);
       return res.status(403).json({
         RM: "Token không hợp lệ hoặc đã hết hạn.",
-        EC: -403,
+        RC: -403,
+        RD: null,
       });
     }
   } catch (error) {
-    console.log(error);
+    console.error(error);
     return res.status(500).json({
       RM: "Lỗi khi xác thực token",
-      EC: -500,
+      RC: -500,
+      RD: null,
     });
   }
 };
 
 const isPrime = () => (req, res, next) => {
   try {
-    console.log("CALL IS PRIME");
     if (!req.user) {
       return res.status(401).json({
         RM: "Chưa xác thực",
-        EC: -401,
+        RC: -401,
+        RD: null,
       });
     }
 
@@ -108,7 +113,8 @@ const isPrime = () => (req, res, next) => {
       console.warn(`USER [${req.user.id}] TRYING CONTROL ADMIN DASHBOARD`);
       return res.status(403).json({
         RM: "Không đủ thẩm quyền",
-        EC: -403,
+        RC: -403,
+        RD: null,
       });
     }
 
@@ -117,7 +123,8 @@ const isPrime = () => (req, res, next) => {
     console.error("isPrime error:", error);
     return res.status(500).json({
       RM: "Lỗi hệ thống",
-      EC: -500,
+      RC: -500,
+      RD: null,
     });
   }
 };
@@ -128,8 +135,8 @@ const isAdmin = () => (req, res, next) => {
     if (req.user?.role !== "admin") {
       return res.status(403).json({
         RM: "Bạn không có quyền truy cập vào tài nguyên này.",
-        EC: -403,
-        ED: "",
+        RC: -403,
+        RD: null,
       });
     }
 
@@ -138,7 +145,8 @@ const isAdmin = () => (req, res, next) => {
     console.error(error);
     return res.status(500).json({
       RM: "Lỗi hệ thống.",
-      EC: 500,
+      RC: 500,
+      RD: null,
     });
   }
 };
@@ -150,7 +158,8 @@ const RequireOTP = (db) => async (req, res, next) => {
     if (!otpSessionID) {
       return res.status(401).json({
         RM: "Yêu cầu xác thực OTP.",
-        EC: -401,
+        RC: -401,
+        RD: null,
       });
     }
     const otpSession = await db.Admin_active_history.findOne({
@@ -165,7 +174,8 @@ const RequireOTP = (db) => async (req, res, next) => {
     if (!otpSession) {
       return res.status(401).json({
         RM: "OTP không hợp lệ hoặc đã hết hạn.",
-        EC: -401,
+        RC: -401,
+        RD: null,
       });
     }
 
@@ -176,7 +186,8 @@ const RequireOTP = (db) => async (req, res, next) => {
       });
       return res.status(401).json({
         RM: "OTP đã hết hạn.",
-        EC: -401,
+        RC: -401,
+        RD: null,
       });
     }
 
@@ -186,10 +197,11 @@ const RequireOTP = (db) => async (req, res, next) => {
 
     next();
   } catch (err) {
-    console.log(err);
+    console.error(err);
     return res.status(500).json({
       RM: "Lỗi khi xác thực OTP",
-      EC: -500,
+      RC: -500,
+      RD: null,
     });
   }
 };

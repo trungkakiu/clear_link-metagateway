@@ -34,7 +34,6 @@ export default (sequelize, DataTypes) => {
       },
       payment_code: {
         type: DataTypes.STRING,
-        unique: true,
         allowNull: true,
         comment: "Mã nội dung chuyển khoản (Ví dụ: PIN12345)",
       },
@@ -133,6 +132,13 @@ export default (sequelize, DataTypes) => {
       tableName: "Pinned_Products",
       timestamps: true,
       underscored: false,
+      indexes: [
+        {
+          unique: true,
+          name: "unique_payment_code",
+          fields: ["payment_code"],
+        },
+      ],
     },
   );
 

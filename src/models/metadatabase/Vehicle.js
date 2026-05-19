@@ -4,7 +4,7 @@ export default (sequelize, DataTypes) => {
     {
       id: { type: DataTypes.STRING, primaryKey: true },
       owner_id: { type: DataTypes.STRING, allowNull: false },
-      plate_number: { type: DataTypes.STRING, allowNull: false, unique: true },
+      plate_number: { type: DataTypes.STRING, allowNull: false },
       vin_number: { type: DataTypes.STRING, allowNull: true },
       vehicle_type: { type: DataTypes.STRING, allowNull: true },
       capacity: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
@@ -93,6 +93,13 @@ export default (sequelize, DataTypes) => {
     {
       tableName: "Vehicle",
       timestamps: true,
+      indexes: [
+        {
+          unique: true,
+          name: "unique_plate_number",
+          fields: ["plate_number"],
+        },
+      ],
       hooks: {
         beforeSave: (vehicle) => {
           if (vehicle.length && vehicle.width && vehicle.height) {
@@ -125,7 +132,7 @@ export default (sequelize, DataTypes) => {
     });
 
     Vehicle.hasMany(models.Item_image, {
-      foreignKey: "owner_id",
+      foreignKey: "parent_id",
       as: "sub_images",
       constraints: false,
       scope: {

@@ -30,9 +30,15 @@ export default (sequelize, DataTypes) => {
       volume: {
         type: DataTypes.VIRTUAL,
         get() {
-          return (this.length * this.width * this.height) / 1000000;
+          const l = parseFloat(this.getDataValue("length")) || 0;
+          const w = parseFloat(this.getDataValue("width")) || 0;
+          const h = parseFloat(this.getDataValue("height")) || 0;
+
+          const result = (l * w * h) / 1000000;
+
+          return parseFloat(result.toFixed(4));
         },
-        comment: "Thể tích khối",
+        comment: "Thể tích khối (m3)",
       },
       max_weight_capacity: {
         type: DataTypes.DECIMAL(10, 2),

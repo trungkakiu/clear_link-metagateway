@@ -6,36 +6,44 @@ export default (sequelize, DataTypes) => {
       sender_id: { type: DataTypes.STRING, allowNull: false },
       customer_id: { type: DataTypes.STRING, allowNull: false },
       shipping_partner: { type: DataTypes.STRING },
+
       Date_of_request_for_loading: {
         type: DataTypes.DATE,
         allowNull: true,
       },
+
       Date_of_request_for_delivery: {
         type: DataTypes.DATE,
         allowNull: true,
       },
+
       Loading_date: {
         type: DataTypes.DATE,
         allowNull: true,
       },
+
       Date_of_delivery: {
         type: DataTypes.DATE,
         allowNull: true,
       },
+
       total_ship_price: {
         type: DataTypes.DECIMAL(10, 2),
         allowNull: true,
       },
+
       distance: {
         type: DataTypes.INTEGER,
         allowNull: true,
       },
+
       fleet_assignments: {
         type: DataTypes.JSON,
         allowNull: true,
         defaultValue: [],
         comment: "Danh sách xe và tài xế: [ {vehicle_id,  driver_id}, ... ]",
       },
+
       fleet_current_locations: {
         type: DataTypes.JSON,
         allowNull: true,
@@ -43,6 +51,7 @@ export default (sequelize, DataTypes) => {
         comment:
           "Cấu trúc: { 'VEHICLE_ID_1': { lat: 21.1, lng: 105.2, updatedAt: '...' }, ... }",
       },
+
       fleet_route_histories: {
         type: DataTypes.JSON,
         allowNull: true,
@@ -50,26 +59,36 @@ export default (sequelize, DataTypes) => {
         comment:
           "Cấu trúc: { 'VEHICLE_ID_1': [ {lat: 21.1, lng: 105.2}, ... ], 'VEHICLE_ID_2': [...] }",
       },
+
       fleet_status: {
         type: DataTypes.JSON,
         allowNull: true,
         defaultValue: {},
         comment:
           "Cấu trúc: { 'VEHICLE_ID_1': 'delivering', 'VEHICLE_ID_2': 'delivered' }",
-        //ship_start picking take_out delivering delivered return
       },
 
       execution_type: {
         type: DataTypes.ENUM("Single", "Convoy", "Independent"),
         defaultValue: "Single",
       },
+
       product_total_price: {
         type: DataTypes.DECIMAL(13, 3),
         allowNull: true,
       },
+
+      amount_ship_received: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+      },
+      minimum_payment_to_start: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+      },
       sender_confirm: {
         type: DataTypes.ENUM("pending", "confirmed"),
-        defaultValue: "confirmed",
+        defaultValue: "pending",
       },
       receiver_confirm: {
         type: DataTypes.ENUM("pending", "accepted", "rejected"),
@@ -93,6 +112,8 @@ export default (sequelize, DataTypes) => {
           "batch_fixed",
           "return",
           "cancelled",
+          "pending_putaway",
+          "completed",
         ),
         defaultValue: "draft",
       },
@@ -105,13 +126,44 @@ export default (sequelize, DataTypes) => {
         allowNull: true,
       },
       payment_method: {
-        type: DataTypes.ENUM("system_wallet", "bank_transfer", "cod"),
-        defaultValue: "bank_transfer",
+        type: DataTypes.ENUM("system_wallet", "prepaid", "cod", "deposit"),
+        defaultValue: "prepaid",
       },
+      deposit_ship_percent: {
+        type: DataTypes.INTEGER,
+        default: 0,
+      },
+      debt: {
+        type: DataTypes.DECIMAL(10, 2),
+        allowNull: true,
+      },
+
       payment_status: {
-        type: DataTypes.ENUM("unpaid", "pending", "paid", "refunded"),
+        type: DataTypes.ENUM(
+          "unpaid",
+          "pending",
+          "paid",
+          "refunded",
+          "partially_paid",
+          "complated",
+          "",
+        ),
         defaultValue: "unpaid",
       },
+
+      shipping_payment_status: {
+        type: DataTypes.ENUM(
+          "unpaid",
+          "pending",
+          "paid",
+          "refunded",
+          "partially_paid",
+          "complated",
+          "",
+        ),
+        defaultValue: "unpaid",
+      },
+
       type_delivery: {
         type: DataTypes.STRING,
         allowNull: true,
@@ -207,13 +259,33 @@ export default (sequelize, DataTypes) => {
           "pairing",
           "pickup_verified",
           "delivery_signed",
+          "completed",
           "order_return",
           "batch_fix",
           "failed",
         ),
         defaultValue: "agreement_pending",
       },
-      blockchain_tx: { type: DataTypes.STRING },
+      hash_agreement: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "mã bảo chứng chain",
+      },
+      hash_transit: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "mã bảo chứng chain",
+      },
+      hash_delivered: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "mã bảo chứng chain",
+      },
+      hash_completed: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "mã bảo chứng chain",
+      },
     },
     {
       tableName: "shipping_order",
@@ -363,7 +435,6 @@ export default (sequelize, DataTypes) => {
       as: "sender_r",
       constraints: false,
     });
-
     shipping_order.belongsTo(models.Manufacturer, {
       foreignKey: "customer_id",
       as: "receiver_m",
@@ -379,10 +450,14 @@ export default (sequelize, DataTypes) => {
       as: "receiver_r",
       constraints: false,
     });
-
     shipping_order.belongsTo(models.Transporter, {
       foreignKey: "shipping_partner",
       as: "shipper_data",
+      constraints: true,
+    });
+    shipping_order.hasOne(models.payment_sessions, {
+      foreignKey: "ship_id",
+      as: "Ship_pay_bill",
       constraints: true,
     });
   };

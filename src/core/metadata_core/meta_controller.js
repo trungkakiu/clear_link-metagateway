@@ -374,8 +374,6 @@ const checkUserOTP = () => async (req, res) => {
       });
     }
 
-    console.log(session.challenge_code, " and ", session.status);
-
     return res.status(200).json({
       RM: "PIN verified successfully",
       RC: 200,
@@ -544,7 +542,7 @@ const createAdminOTP = async (req, res) => {
       });
     }
   } catch (error) {
-    console.log("[createAdminOTP ERROR]", error);
+    console.error("[createAdminOTP ERROR]", error);
     return res.status(500).json({
       RM: "Lỗi máy chủ, không thể tạo OTP",
       RC: -500,
@@ -615,7 +613,7 @@ const verifyAdminOTP = async (req, res) => {
       RD: oneTimeOTP,
     });
   } catch (error) {
-    console.log("[verifyAdminOTP ERROR]", error);
+    console.error("[verifyAdminOTP ERROR]", error);
     return res.status(500).json({
       RM: "Internal Server Error",
       RC: -500,
@@ -633,7 +631,6 @@ const userLogin = async (req, res) => {
     }
 
     const { email, password } = req.body;
-    console.log;
     if (!email || !password) {
       return res
         .status(200)
@@ -660,7 +657,7 @@ const userLogin = async (req, res) => {
         });
       }
     } catch (err) {
-      console.log("Lỗi truy vấn DB:", err);
+      console.error("Lỗi truy vấn DB:", err);
       return res.status(500).json({ RM: "DB error", RC: 500 });
     }
 
@@ -685,7 +682,7 @@ const userLogin = async (req, res) => {
     try {
       isMatch = await bcrypt.compare(password, user.password);
     } catch (err) {
-      console.log("bcrypt.compare lỗi:", err);
+      console.error("bcrypt.compare lỗi:", err);
       return res.status(500).json({
         RM: "Password compare error",
         RC: 500,
@@ -723,7 +720,7 @@ const userLogin = async (req, res) => {
         User_agent: user_agent,
       });
     } catch (err) {
-      console.log("Lỗi tạo JWT:", err);
+      console.error("Lỗi tạo JWT:", err);
       return res.status(500).json({
         RM: "Token creation error",
         RC: 500,
@@ -996,7 +993,7 @@ const create_pending_profile = async (req, res) => {
           isRead: true,
         });
       } catch (error) {
-        console.log("Create pending error:", error);
+        console.error("Create pending error:", error);
         return res.status(500).json({
           RM: "Internal data server error!",
           RC: 500,
@@ -1015,7 +1012,7 @@ const create_pending_profile = async (req, res) => {
       });
     }
   } catch (error) {
-    console.log(error);
+    console.error(error);
     return res.status(500).json({
       RM: "Internal server error!",
       RC: 500,
@@ -1048,7 +1045,7 @@ const userLogout = async (req, res) => {
       RC: 200,
     });
   } catch (error) {
-    console.log("Logout error:", error);
+    console.error("Logout error:", error);
     return res.status(500).json({
       RM: "Internal logout error",
       RC: 500,
@@ -1261,7 +1258,7 @@ const mailResendPendingUser = (db) => async (req, res) => {
       RC: 201,
     });
   } catch (error) {
-    console.log("Mail resend error:", error);
+    console.error("Mail resend error:", error);
     return res.status(500).json({
       RM: "Internal error",
       RC: 500,
@@ -1314,7 +1311,7 @@ const getMe = (db) => async (req, res) => {
       });
     }
   } catch (error) {
-    console.log("server error:", error);
+    console.error("server error:", error);
     return res.status(500).json({
       RM: "Internal error",
       RC: 500,
@@ -1357,7 +1354,7 @@ const user_setup_login = (db) => async (req, res) => {
         });
       }
     } catch (err) {
-      console.log("Lỗi truy vấn DB:", err);
+      console.error("Lỗi truy vấn DB:", err);
       return res.status(500).json({ RM: "DB error", RC: 500 });
     }
 
@@ -1379,7 +1376,7 @@ const user_setup_login = (db) => async (req, res) => {
     try {
       isMatch = await bcrypt.compare(password, user.password);
     } catch (err) {
-      console.log("bcrypt error:", err);
+      console.error("bcrypt error:", err);
       return res.status(500).json({ RM: "bcrypt error", RC: 500 });
     }
 
@@ -1431,7 +1428,7 @@ const user_setup_login = (db) => async (req, res) => {
         phone_number: user.phone_number,
       });
     } catch (err) {
-      console.log("JWT error:", err);
+      console.error("JWT error:", err);
       return res.status(500).json({ RM: "JWT error", RC: 500 });
     }
 
@@ -1700,117 +1697,94 @@ export const createSetting = async (req, res) => {
   }
 };
 
-const auto_approve_product = async (db, product_id) => {
-  try {
-    const setting = await db.System_Settings.findOne({
-      where: { key: "ATOAPP" },
-    });
-    if (!setting || setting.value !== "true") {
-      return;
-    }
-
-    const product = await db.Product_model.findAll({
-      where: {
-        chain_status: "pending",
-      },
-      limit: 5,
-      order: [["createdAt", "ASC"]],
-    });
-
-    if (!product) {
-      console.log("Product not found for auto-approval:", product_id);
-      return;
-    }
-    product.approval_status = "approved";
-    await product.save();
-    console.log("Product auto-approved:", product_id);
-  } catch (error) {
-    console.error("Error in auto-approving product:", error);
-  }
-};
-
 const createRawProduct = (db) => async (req, res) => {
   try {
-    console.log("call====");
     const { id, author, responsible_person, category_id } = req.body;
+
     if (!id || !author || !responsible_person || !category_id) {
       return res.status(400).json({
         RM: "Thiếu dữ liệu đầu vào",
         RC: -203,
       });
     }
+
     const raw_product = {
-      id: "",
-      author: "",
-      responsible_person: "",
-      category_id: "",
+      product_info: null,
+      author_info: null,
+      actor_info: null,
+      category_info: null,
     };
-    raw_product.responsible_person = await db.Actor_model.findOne({
+
+    raw_product.actor_info = await db.Actor_model.findOne({
       where: { id: responsible_person },
       attributes: ["id", "name", "role", "email", "phone_number"],
     });
-    if (!raw_product.responsible_person) {
-      return res.status(200).json({
-        RM: "Người phụ trách không tồn tại!",
-        RC: -204,
-      });
+
+    if (!raw_product.actor_info) {
+      return res
+        .status(200)
+        .json({ RM: "Người phụ trách không tồn tại!", RC: -204 });
     }
 
-    switch (raw_product.responsible_person.role) {
+    switch (raw_product.actor_info.role) {
       case "manufacturer":
-        raw_product.author = await db.Manufacturer.findOne({
+        raw_product.author_info = await db.Manufacturer.findOne({
           where: { id: author },
         });
         break;
       case "distributor":
-        raw_product.author = await db.Distributor.findOne({
+        raw_product.author_info = await db.Distributor.findOne({
           where: { id: author },
         });
         break;
       case "retailer":
-        raw_product.author = await db.Retailer.findOne({
+        raw_product.author_info = await db.Retailer.findOne({
           where: { id: author },
         });
         break;
       default:
-        return res.status(200).json({
-          RM: "Vai trò người dùng không hợp lệ !",
-          RC: -205,
-        });
+        return res
+          .status(200)
+          .json({ RM: "Vai trò người dùng không hợp lệ!", RC: -205 });
     }
 
-    if (!raw_product.author) {
-      return res.status(200).json({
-        RM: "Tác giả không tồn tại!",
-        RC: -206,
-      });
+    if (!raw_product.author_info) {
+      return res
+        .status(200)
+        .json({ RM: "Tác giả (Công ty) không tồn tại!", RC: -206 });
     }
 
-    raw_product.id = await db.Product.findOne({ where: { id: id } });
-    if (!raw_product.id) {
-      return res.status(200).json({
-        RM: "Sản phẩm không tồn tại!",
-        RC: -207,
-      });
+    raw_product.product_info = await db.Product.findOne({
+      where: { id: id },
+      include: [
+        {
+          model: db.Product_Metadata,
+          as: "versions",
+          where: { is_latest: true },
+          required: false,
+        },
+      ],
+    });
+
+    if (!raw_product.product_info) {
+      return res.status(200).json({ RM: "Sản phẩm không tồn tại!", RC: -207 });
     }
 
-    raw_product.category_id = await db.Product_category.findOne({
+    raw_product.category_info = await db.Product_category.findOne({
       where: { id: category_id },
     });
-    if (!raw_product.category_id) {
-      return res.status(200).json({
-        RM: "Danh mục không tồn tại!",
-        RC: -208,
-      });
+
+    if (!raw_product.category_info) {
+      return res.status(200).json({ RM: "Danh mục không tồn tại!", RC: -208 });
     }
 
     return res.status(200).json({
-      RM: "Lấy thông tin sản phẩm thô thành công!",
+      RM: "Tạo sản phẩm thô thành công!",
       RC: 200,
       RD: raw_product,
     });
   } catch (error) {
-    console.error("Unhandled error:", error);
+    console.error("Unhandled error in createRawProduct:", error);
     return res.status(500).json({
       RM: "Internal server error!",
       RC: 500,
@@ -1818,23 +1792,52 @@ const createRawProduct = (db) => async (req, res) => {
   }
 };
 
-const dropProductBlock = async (db, block_id, type) => {
+const dropProductBlock = async (db, product_id, type) => {
   try {
     const blockRecord = await db.Product.findOne({
-      where: { id: block_id },
+      where: { id: product_id },
+      include: [
+        {
+          model: db.Product_Metadata,
+          as: "versions",
+          where: { is_latest: true },
+          required: false,
+        },
+      ],
     });
 
     if (!blockRecord) {
-      return res.status(404).json({
-        RM: "Block record not found",
+      return {
+        ok: false,
+        RM: "Không tìm thấy sản phẩm Gốc (Master record)",
         RC: -204,
-      });
+      };
     }
-    await blockRecord.update({ chain_status: "wait-droped" });
-    return true;
+
+    const latestMetadata = blockRecord.versions && blockRecord.versions[0];
+
+    if (!latestMetadata) {
+      return {
+        ok: false,
+        RM: "Sản phẩm này chưa có phiên bản (Metadata) nào để Drop!",
+        RC: -205,
+      };
+    }
+
+    await latestMetadata.update({ chain_status: "wait-droped" });
+
+    return {
+      ok: true,
+      RM: "Đã đưa phiên bản vào danh sách chờ Drop Block thành công",
+      RC: 200,
+    };
   } catch (error) {
     console.error("Error dropping product block:", error);
-    return false;
+    return {
+      ok: false,
+      RM: "Lỗi hệ thống khi Drop Block",
+      RC: 500,
+    };
   }
 };
 
@@ -2058,7 +2061,7 @@ const editDepartment = (db) => async (req, res) => {
       });
     }
 
-    await Part.update({
+    const updateData = await Part.update({
       isExcute: typeof isExcute === "boolean" ? isExcute : Part.isExcute,
       active: typeof active === "boolean" ? active : Part.active,
       isRead: typeof isRead === "boolean" ? isRead : Part.isRead,
@@ -2070,7 +2073,7 @@ const editDepartment = (db) => async (req, res) => {
 
       role_level: typeof role_level === "string" ? role_level : Part.role_level,
     });
-
+    req.ai_final_payload = updateData;
     return res.status(200).json({
       RM: "Thay đổi thông tin thành công!",
       RC: 200,
@@ -2646,7 +2649,7 @@ const changestaffpartment = (db) => async (req, res) => {
     }
 
     const partment = await db.Department.findByPk(partmentid);
-
+    req.ai_mapped_payload = partment.toJSON();
     if (!partment) {
       return res.status(400).json({
         RM: "không tìm thấy bộ phận mục tiêu!",
@@ -2671,7 +2674,7 @@ const changestaffpartment = (db) => async (req, res) => {
     await staff.update({
       department_id: partmentid,
     });
-
+    req.ai_mapped_payload = staff.toJSON();
     return res.status(200).json({
       RM: "Thay đổi bộ phận thành công!",
       RC: 200,
@@ -2686,23 +2689,16 @@ const changestaffpartment = (db) => async (req, res) => {
 };
 
 const uploadstaffcard = (db) => async (req, res) => {
+  const filecard = req.files?.staff_card;
+
   try {
     const STAFF_CARD_DIR = path.join(process.cwd(), process.env.STAFF_CARD_URL);
     const { staff_id } = req?.params;
 
-    if (!staff_id) {
-      meta_core_controller.cleanupUploadedFiles(filecard);
+    if (!staff_id || !filecard || filecard.length === 0) {
+      if (filecard) meta_core_controller.cleanupUploadedFiles(filecard);
       return res.status(400).json({
-        RM: "Lỗi thêm ảnh, thiếu dữ liệu!",
-        RC: 203,
-      });
-    }
-    const filecard = req.files?.staff_card;
-
-    if (!filecard || filecard.length === 0) {
-      meta_core_controller.cleanupUploadedFiles(filecard);
-      return res.status(400).json({
-        RM: "Lỗi thêm ảnh, thiếu file!",
+        RM: "Thiếu dữ liệu staff_id hoặc file ảnh!",
         RC: 203,
       });
     }
@@ -2713,60 +2709,54 @@ const uploadstaffcard = (db) => async (req, res) => {
     if (!staff) {
       meta_core_controller.cleanupUploadedFiles(filecard);
       return res.status(400).json({
-        RM: "Lỗi thêm ảnh, không tìm thấy người dùng!",
+        RM: "Không tìm thấy nhân viên trong hệ thống!",
         RC: 203,
       });
     }
 
-    if (staff.actor_id) {
-      const actor = await db.Actor_model.findByPk(staff.actor_id);
-      if (!actor) {
-        meta_core_controller.cleanupUploadedFiles(filecard);
-        return res.status(400).json({
-          RM: "Lỗi thêm ảnh, không tìm thấy người dùng!",
-          RC: 203,
-        });
+    const actor = await db.Actor_model.findByPk(staff.id);
+    const oldAvatar = staff.avatar;
+
+    const t = await db.sequelize.transaction();
+    try {
+      await staff.update({ avatar: file.filename }, { transaction: t });
+
+      if (actor) {
+        actor.avatar = file.filename;
+        await actor.save({ transaction: t });
+        console.log(
+          `[Update] Đã đồng bộ Avatar cho tài khoản Actor: ${staff.id}`,
+        );
       }
 
-      actor.avatar = file.filename;
-      await actor.save();
+      await t.commit();
+
+      if (oldAvatar) {
+        Helper__funtion.removeOldAvatar(oldAvatar, STAFF_CARD_DIR);
+      }
+
+      req.ai_mapped_payload = actor ? actor.toJSON() : staff.toJSON();
 
       return res.status(200).json({
         RC: 200,
-        RM: "Upload thành công",
+        RM: actor
+          ? "Cập nhật ảnh nhân viên & tài khoản thành công"
+          : "Cập nhật ảnh nhân viên thành công",
         RD: {
           filename: file.filename,
-          path: file.path,
+          sync_actor: !!actor,
         },
       });
+    } catch (dbError) {
+      await t.rollback();
+      throw dbError;
     }
-    if (staff.avatar) {
-      Helper__funtion.removeOldAvatar(staff.avatar, STAFF_CARD_DIR);
-    }
-
-    await staff.update({
-      avatar: file.filename,
-    });
-
-    return res.status(200).json({
-      RC: 200,
-      RM: "Upload thành công",
-      RD: {
-        filename: file.filename,
-        path: file.path,
-      },
-    });
   } catch (error) {
-    console.error(error);
-    const filecard = req.files?.staff_card;
-    meta_core_controller.cleanupUploadedFiles(filecard);
-    return res.status(500).json({
-      RM: "Internal server error!",
-      RC: 500,
-    });
+    console.error("uploadstaffcard Error:", error);
+    if (filecard) meta_core_controller.cleanupUploadedFiles(filecard);
+    return res.status(500).json({ RM: "Lỗi hệ thống!", RC: 500 });
   }
 };
-
 const newLeaderDepartment = (db) => async (req, res) => {
   try {
     const { company_id } = req.user;
@@ -2816,7 +2806,7 @@ const newLeaderDepartment = (db) => async (req, res) => {
         leader_id: staff.id,
       });
     }
-
+    req.ai_mapped_payload = department.toJSON();
     return res.status(200).json({
       RM: "Thay đổi leader thành công!",
       RC: 200,
@@ -2852,15 +2842,13 @@ const user_edit_profile = (db) => async (req, res) => {
       address_2: address_2 !== undefined ? address_2 : user.address_2,
     };
 
-    console.log(updatedData);
-
-    await user.update(updatedData, { transaction: t });
-
+    const data = await user.update(updatedData, { transaction: t });
+    req.ai_mapped_payload = user.toJSON();
     await t.commit();
     return res.status(200).json({
       RC: 200,
       RM: "Cập nhật thông tin thành công!",
-      RD: updatedData,
+      RD: user,
     });
   } catch (error) {
     if (t) await t.rollback();
@@ -2882,6 +2870,7 @@ const CompanyProfile = (db) => async (req, res) => {
         RC: -203,
       });
     }
+
     const ROLE_MAP = {
       manufacturer: "Manufacturer",
       distributor: "Distributor",
@@ -2899,7 +2888,6 @@ const CompanyProfile = (db) => async (req, res) => {
     }
 
     const company_info = await db[modelName].findByPk(company_id);
-
     if (!company_info) {
       return res.status(404).json({
         RM: "Không tìm thấy thông tin doanh nghiệp!",
@@ -2907,10 +2895,48 @@ const CompanyProfile = (db) => async (req, res) => {
       });
     }
 
+    const wallet_info = await db.Company_Wallets.findOne({
+      where: {
+        company_id: String(company_id),
+      },
+    });
+
+    const Qrwallet = await db.payment_sessions.findOne({
+      where: {
+        payer_id: String(company_id),
+        type: "verify",
+        status: "pending",
+      },
+    });
+
+    let paymentSessionData = null;
+
+    if (Qrwallet) {
+      const SYSTEM_BANK_BIN = process.env.ADMIN_BANKPIN || "BIDV";
+      const SYSTEM_ACC_NUM = process.env.ADMIN_ACCOUTSERI || "96247R3CT5";
+      const SYSTEM_ACC_NAME = process.env.ADMIN_ACCOUTNAME || "DO DANG CHUNG";
+
+      const AMOUNT_EXPECTED = Qrwallet.amount_expected || 5000;
+      const paymentCode = Qrwallet.payment_code;
+
+      const qrUrl = `https://img.vietqr.io/image/${SYSTEM_BANK_BIN}-${SYSTEM_ACC_NUM}-compact2.png?amount=${AMOUNT_EXPECTED}&addInfo=${encodeURIComponent(paymentCode)}&accountName=${encodeURIComponent(SYSTEM_ACC_NAME)}`;
+
+      paymentSessionData = {
+        session_id: Qrwallet.id,
+        transfer_content: paymentCode,
+        amount: AMOUNT_EXPECTED,
+        qr_url: qrUrl,
+      };
+    }
+
     return res.status(200).json({
       RM: "Lấy thông tin doanh nghiệp thành công!",
       RC: 200,
-      RD: company_info,
+      RD: {
+        company_info: company_info,
+        walletData: wallet_info,
+        Qrwallet: paymentSessionData,
+      },
     });
   } catch (error) {
     console.error("Fetch Company Profile Error:", error);
@@ -2973,7 +2999,7 @@ const editCompany = (db) => async (req, res) => {
     }
 
     await company.update(updateData);
-
+    req.ai_mapped_payload = company.toJSON();
     return res.status(200).json({
       RC: 200,
       RM: "Cập nhật thông tin doanh nghiệp thành công!",
@@ -3202,8 +3228,95 @@ const printedQRBatch = (db) => async (req, res) => {
   }
 };
 
+const get_shiping_oder_filer = (db) => async (req, res) => {
+  try {
+    const { company_id } = req?.user;
+    console.log("call===========================");
+    const {
+      shipment_ids,
+      status,
+      start_date,
+      end_date,
+      sort_order = "desc",
+      limit = 5,
+    } = req.body;
+
+    console.log("body: ", req.body);
+
+    let whereCondition = {
+      sender_id: company_id,
+    };
+
+    if (
+      shipment_ids &&
+      Array.isArray(shipment_ids) &&
+      shipment_ids.length > 0
+    ) {
+      whereCondition.id = { [Op.in]: shipment_ids };
+    }
+
+    if (status) {
+      whereCondition.status = status;
+    }
+
+    if (start_date || end_date) {
+      whereCondition.createdAt = {};
+
+      if (start_date) {
+        const start = new Date(start_date);
+        start.setHours(0, 0, 0, 0);
+        whereCondition.createdAt[Op.gte] = start;
+      }
+
+      if (end_date) {
+        const end = new Date(end_date);
+        end.setHours(23, 59, 59, 999);
+        whereCondition.createdAt[Op.lte] = end;
+      }
+    }
+
+    const orders = await db.shipping_order.findAll({
+      where: whereCondition,
+      limit: parseInt(limit),
+      order: [["createdAt", sort_order.toUpperCase()]],
+      include: [{ model: db.product_batch, as: "batches" }],
+    });
+
+    if (!orders || orders.length === 0) {
+      return res.status(200).json({
+        RC: 200,
+        RM: "Dạ Anh ơi, hiện tại hệ thống không tìm thấy đơn hàng nào khớp với yêu cầu của Anh ạ.",
+        RD: [],
+      });
+    }
+
+    const formattedData = orders.map((order) => ({
+      ID: order.id,
+      Status: order.status,
+      Đến: order.target_add || order.delivery_address,
+      Ngày: order.createdAt,
+      "Số lượng": order.total_quantity,
+      "Trọng lượng": order.total_weight + " kg",
+      Blockchain: order.onchain_status,
+    }));
+
+    return res.status(200).json({
+      RC: 200,
+      RM: "Dạ em đã tìm thấy danh sách lô hàng cho Anh rồi đây ạ!",
+      RD: formattedData,
+    });
+  } catch (error) {
+    console.error("Lỗi tại get_shiping_oder_filer:", error);
+    return res.status(500).json({
+      RM: "Dạ lỗi hệ thống khi lọc đơn hàng: " + error.message,
+      RC: 500,
+    });
+  }
+};
+
 export default {
   getValidVehicle,
+  get_shiping_oder_filer,
   printedQRBatch,
   createQRBatch,
   user_edit_profile,

@@ -10,6 +10,32 @@ let running_ATORMP = false;
 let running_ATOACT = false;
 let running_ATOAPB = false;
 let running_ATOASO = false;
+let running_ATOSPS = false;
+
+async function loop_ATOAPS(db, nodes) {
+  if (running_ATOSPS) return;
+  running_ATOSPS = true;
+
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOAPS" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return;
+    }
+
+    await meta_ws_controller.Auto_pair_payment(db, nodes);
+
+    const delay = Number(settings.value) || 15000;
+    setTimeout(() => loop_ATOAPS(db, nodes), delay);
+  } catch (err) {
+    console.error("[running_ATOSPS]", err);
+    setTimeout(() => loop_ATOAPS(db, nodes), 5000);
+  } finally {
+    running_ATOSPS = false;
+  }
+}
 
 async function loop_ATOASO(db, nodes) {
   if (running_ATOASO) return;
@@ -202,7 +228,6 @@ async function loop_ATORMP(db, nodes) {
     });
 
     if (!settings || settings.enabled !== true) {
-      console.warn("[ATORMP] disabled or missing settings");
       running_ATORMP = false;
       return;
     }
@@ -227,10 +252,6 @@ async function loop_ATORMP(db, nodes) {
 
 const initCronJobs = (db) => {
   cron.schedule("0 0 * * *", async () => {
-    console.log(
-      "--- Đang chạy tác vụ cập nhật trạng thái Batch tự động (00:00) ---",
-    );
-
     try {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -253,6 +274,7 @@ const initCronJobs = (db) => {
 };
 
 export default {
+  loop_ATOAPS,
   loop_ATOAPP,
   loop_ATOAPB,
   loop_ATOAPU,

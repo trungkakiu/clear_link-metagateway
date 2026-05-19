@@ -1,3 +1,5 @@
+import { Op } from "sequelize";
+
 const getUserDashbroad = (db) => async (req, res) => {
   try {
     const { company_id, id } = req?.user;
@@ -89,7 +91,7 @@ const updatePos = (db) => async (req, res) => {
 
     const currentLocations = { ...currentOrder.fleet_current_locations };
     const fleet_status = { ...currentOrder.fleet_status };
-    if (fleet_status[vehicle_id] !== "delivering") {
+    if (fleet_status[vehicle_id] === "not_start") {
       if (t) await t.rollback();
       return res.status(400).json({
         RM: "Xe chưa bắt đầu đơn hàng!",
@@ -178,8 +180,49 @@ const userUpdatefcm_token = (db) => async (req, res) => {
   }
 };
 
+const getRecentLogs = (db) => async (req, res) => {
+  try {
+    const { company_id } = req?.user;
+
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const startOfRange = new Date();
+    startOfRange.setDate(startOfRange.getDate() - 3);
+    startOfRange.setHours(0, 0, 0, 0);
+
+    const logs = await db.Activity_Log_TraceChain.findAll({
+      where: {
+        company_id: company_id,
+        created_at: {
+          [Op.between]: [startOfRange, endOfDay],
+        },
+      },
+      include: [
+        {
+          model: db.Actor_model,
+          as: "performer",
+          attributes: ["id", "name", "phone_number", "email"],
+        },
+      ],
+      order: [["created_at", "DESC"]],
+      limit: 1000,
+    });
+
+    return res.status(200).json({
+      RC: 200,
+      RM: `Dạ Anh, em đã lấy được ${logs.length} bản ghi trong 3 ngày qua ạ.`,
+      RD: logs,
+    });
+  } catch (error) {
+    console.error("Lỗi getRecentLogs:", error);
+    return res.status(500).json({ RM: error.message, RC: 500 });
+  }
+};
+
 export default {
   updatePos,
+  getRecentLogs,
   userUpdatefcm_token,
   getUserDashbroad,
 };

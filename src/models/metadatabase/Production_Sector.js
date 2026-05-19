@@ -13,7 +13,6 @@ export default (sequelize, DataTypes) => {
       },
       key: {
         type: DataTypes.STRING,
-        unique: true,
       },
       icon: {
         type: DataTypes.STRING,
@@ -27,6 +26,13 @@ export default (sequelize, DataTypes) => {
     {
       tableName: "Production_Sectors",
       timestamps: false,
+      indexes: [
+        {
+          unique: true,
+          name: "unique_key",
+          fields: ["key"],
+        },
+      ],
     },
   );
 

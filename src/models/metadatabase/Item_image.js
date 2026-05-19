@@ -21,7 +21,7 @@ export default (sequelize, DataTypes) => {
         allowNull: false,
       },
       parent_id: {
-        type: DataTypes.STRING,
+        type: DataTypes.UUID,
         allowNull: false,
       },
       owner_id: {
@@ -45,12 +45,12 @@ export default (sequelize, DataTypes) => {
 
   Item_image.associate = (models) => {
     Item_image.belongsTo(models.Vehicle, {
-      foreignKey: "owner_id",
+      foreignKey: "parent_id",
       constraints: false,
       as: "vehicle",
     });
-    Item_image.belongsTo(models.Product, {
-      foreignKey: "owner_id",
+    Item_image.belongsTo(models.Product_Metadata, {
+      foreignKey: "parent_id",
       constraints: false,
       as: "Product",
     });

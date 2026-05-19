@@ -27,8 +27,32 @@ export default (sequelize, DataTypes) => {
         type: DataTypes.ENUM("EMPTY", "PARTIAL", "FULL", "MAINTENANCE"),
         defaultValue: "EMPTY",
       },
+      reserved_weight: {
+        type: DataTypes.DECIMAL(10, 2),
+        defaultValue: 0,
+        comment:
+          "Trọng lượng/Số lượng đang được hệ thống gợi ý cất vào (Giữ chỗ mềm)",
+      },
+      length: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0 },
+      width: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0 },
+      height: { type: DataTypes.DECIMAL(10, 2), defaultValue: 0 },
+      max_volume: {
+        type: DataTypes.DECIMAL(10, 4),
+        defaultValue: 0,
+        comment: "Sức chứa tối đa theo Thể tích (m³)",
+      },
+      current_volume: {
+        type: DataTypes.DECIMAL(10, 4),
+        defaultValue: 0,
+        comment: "Thể tích đang bị chiếm dụng thực tế (m³)",
+      },
+      reserved_volume: {
+        type: DataTypes.DECIMAL(10, 4),
+        defaultValue: 0,
+        comment: "Thể tích đang bị thuật toán giữ chỗ (m³)",
+      },
       allowed_categories: {
-        type: DataTypes.JSON, 
+        type: DataTypes.JSON,
         allowNull: true,
       },
     },

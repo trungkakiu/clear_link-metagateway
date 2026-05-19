@@ -7,13 +7,11 @@ export default (sequelize, DataTypes) => {
         primaryKey: true,
         autoIncrement: true,
       },
-      // ID của doanh nghiệp (Lấy từ bảng tương ứng)
       company_id: {
         type: DataTypes.STRING,
         allowNull: false,
-        // BỎ references ở đây vì ID này có thể thuộc về 4 bảng khác nhau
+      
       },
-      // Phân loại: 'manufacturer', 'distributor', 'retailer', 'transporter'
       company_type: {
         type: DataTypes.STRING,
         allowNull: false,

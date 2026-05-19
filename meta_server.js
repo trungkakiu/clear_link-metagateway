@@ -24,6 +24,7 @@ import { where } from "sequelize";
 import "./src/auth/google.strategy.js";
 import passport from "passport";
 import clientServer, { broadcastNotification } from "./client_socket_server.js";
+import Helper__funtion from "./src/utils/Helper__funtion.js";
 
 dotenv.config();
 
@@ -117,11 +118,14 @@ const corsOptions = {
       "https://app.clearlink.io.vn",
       "https://api.clearlink.io.vn",
       "https://admin.clearlink.io.vn",
+      "https://ai.clearlink.io.vn",
       "https://user.clearlink.io.vn",
       "http://localhost:3012",
       "http://localhost:3010",
+      "http://localhost:8000",
       "http://127.0.0.1:3012",
       "http://127.0.0.1:3010",
+      "http://127.0.0.1:8000",
     ];
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
@@ -138,6 +142,9 @@ const corsOptions = {
     "x-session-id",
     "x-challenge-code",
     "ngrok-skip-browser-warning",
+    "x-resource-id",
+    "x-tracechain-lat",
+    "x-tracechain-lon",
   ],
   credentials: true,
   optionsSuccessStatus: 200,
@@ -150,6 +157,7 @@ const PORT = nodeConfig.port || process.env.PORT || 5099;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.set("trust proxy", true);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -201,6 +209,22 @@ const __dirname = path.dirname(__filename);
     );
 
     app.use(
+      "/Company-kyc",
+      express.static(
+        path.join(__dirname, "src", "Access", "company_wallet_kyc"),
+        STATIC_CACHE_CONFIG,
+      ),
+    );
+
+    app.use(
+      "/Company-qrcode",
+      express.static(
+        path.join(__dirname, "src", "Access", "company_qr_code"),
+        STATIC_CACHE_CONFIG,
+      ),
+    );
+
+    app.use(
       "/Sub-image",
       express.static(
         path.join(__dirname, "src", "Access", "Sub_productimage"),
@@ -244,7 +268,18 @@ const __dirname = path.dirname(__filename);
     Server_setting_loop.loop_ATOAPC(db, nodes);
     Server_setting_loop.loop_ATOACT(db, nodes);
     Server_setting_loop.loop_ATOAPB(db, nodes);
+    Server_setting_loop.loop_ATOAPS(db, nodes);
     Server_setting_loop.initCronJobs(db);
+
+    const handleShutdown = async () => {
+      console.log(" Server đang tắt, tiến hành xả nốt hàng đợi Log...");
+      await Helper__funtion.flushLogs(db);
+      process.exit(0);
+    };
+
+    process.on("SIGINT", handleShutdown);
+    process.on("SIGTERM", handleShutdown);
+
     server.listen(PORT, "0.0.0.0", () => {
       console.log(`Meta Server chạy tại: http://0.0.0.0:${PORT}`);
       console.log(`WebSocket chạy tại: ws://0.0.0.0:${PORT}`);

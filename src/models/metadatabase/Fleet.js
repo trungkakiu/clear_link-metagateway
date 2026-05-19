@@ -5,7 +5,7 @@ export default (sequelize, DataTypes) => {
       id: { type: DataTypes.STRING, primaryKey: true },
       transporter_id: { type: DataTypes.STRING, allowNull: false },
       fleet_name: { type: DataTypes.STRING, allowNull: false },
-      fleet_code: { type: DataTypes.STRING, allowNull: false, unique: true },
+      fleet_code: { type: DataTypes.STRING, allowNull: false },
       manager_name: { type: DataTypes.STRING, allowNull: false },
       manager_phone: { type: DataTypes.STRING, allowNull: true },
       operation_area: { type: DataTypes.JSON, allowNull: true },
@@ -49,7 +49,21 @@ export default (sequelize, DataTypes) => {
         comment: "Mô tả nhiệm vụ hoặc mục tiêu của đội xe",
       },
     },
-    { tableName: "Fleet", timestamps: true },
+    {
+      tableName: "Fleet",
+      timestamps: true,
+      indexes: [
+        {
+          name: "idx_fleet_code_unique",
+          unique: true,
+          fields: ["fleet_code"],
+        },
+        {
+          name: "idx_fleet_transporter_id",
+          fields: ["transporter_id"],
+        },
+      ],
+    },
   );
 
   Fleet.associate = (models) => {

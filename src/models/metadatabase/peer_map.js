@@ -33,7 +33,7 @@ export default (sequelize, DataTypes) => {
     {
       tableName: "peer_map",
       timestamps: true,
-    }
+    },
   );
 
   return peer_map;

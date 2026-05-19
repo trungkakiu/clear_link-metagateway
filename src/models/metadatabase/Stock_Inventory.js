@@ -34,6 +34,10 @@ export default (sequelize, DataTypes) => {
       foreignKey: "product_id",
       as: "product_info",
     });
+    Stock_Inventory.belongsTo(models.product_batch, {
+      foreignKey: "batch_id",
+      as: "batch_info",
+    });
   };
   return Stock_Inventory;
 };

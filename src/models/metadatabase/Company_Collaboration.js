@@ -67,7 +67,11 @@ export default (sequelize, DataTypes) => {
       contract_pdf_url: DataTypes.STRING,
       contract_id: DataTypes.STRING,
       digital_signatures: { type: DataTypes.JSON, defaultValue: {} },
-      blockchain_tx: DataTypes.STRING,
+      txt_hash: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "mã bảo chứng chain",
+      },
       onchain_status: { type: DataTypes.STRING, defaultValue: "off-chain" },
       accepted_at: DataTypes.DATE,
       official_at: DataTypes.DATE,

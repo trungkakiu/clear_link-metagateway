@@ -16,6 +16,13 @@ const sequelize = new Sequelize(
     host: process.env.META_DB_HOST || "localhost",
     port: process.env.META_DB_PORT || 3399,
     dialect: "mysql",
+    dialect: "mysql", // hoặc postgres
+    timezone: "+07:00", // Ép về múi giờ Việt Nam
+    dialectOptions: {
+      useUTC: false, // Không dùng UTC
+      dateStrings: true,
+      typeCast: true,
+    },
     logging: false,
     dialectOptions: {
       multipleStatements: true,

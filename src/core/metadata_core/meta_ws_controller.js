@@ -10,6 +10,7 @@ import Helper__funtion from "../../utils/Helper__funtion.js";
 import { Op } from "sequelize";
 import meta_controller from "./meta_controller.js";
 import meta_core_controller from "./meta_core_controller.js";
+import { version } from "os";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,38 +58,52 @@ const auto_pair_product = async (db, nodes) => {
     });
 
     if (!settings || settings.enabled !== true) {
-      return {
-        ok: false,
-        msg: "Auto approve product is disabled.",
-      };
+      return { ok: false, msg: "Auto approve product is disabled." };
     }
 
-    const product_list = await db.Product.findAll({
+    const metadata_list = await db.Product_Metadata.findAll({
       where: { chain_status: "pending" },
-      limit: 5,
+      limit: 15,
+      include: [
+        {
+          model: db.Product,
+          as: "master",
+          required: true,
+        },
+      ],
     });
 
-    if (!product_list || product_list.length === 0) {
-      return {
-        ok: false,
-        msg: "Không có sản phẩm pending.",
-      };
+    if (!metadata_list || metadata_list.length === 0) {
+      return { ok: false, msg: "Không có metadata sản phẩm nào pending." };
     }
 
     const result_map = [];
 
-    for (const product of product_list) {
-      await product.update({
-        chain_status: "pairing",
-      });
+    for (const metadata of metadata_list) {
+      await metadata.update({ chain_status: "pairing" });
+
+      const product_master = metadata.master;
+
       const item_result = {
-        product_id: product.id,
+        metadata_id: metadata.id,
+        product_id: product_master.id,
         vote: null,
         commit: null,
         status: "pairing",
       };
 
-      const raw = `${product.id}|${product.author}|${product.responsible_person}|${product.price}`;
+      const raw = [
+        String(metadata.id || "").trim(),
+        String(product_master.id || "").trim(),
+        String(metadata.version || "1").trim(),
+        String(product_master.author || "")
+          .normalize("NFC")
+          .trim(),
+        String(metadata.responsible_person || "")
+          .normalize("NFC")
+          .trim(),
+        String(metadata.price || "").trim(),
+      ].join("|");
 
       const product_hash = crypto
         .createHash("sha256")
@@ -98,11 +113,12 @@ const auto_pair_product = async (db, nodes) => {
       const vote_results = await pair_validate.get_vote(
         db,
         product_hash,
-        product.id,
+        metadata.id,
         "product_create",
         "active",
         nodes,
-        "new",
+        metadata.version,
+        metadata.version === 1 ? "new" : "update",
       );
 
       item_result.vote = vote_results;
@@ -113,23 +129,23 @@ const auto_pair_product = async (db, nodes) => {
         vote_results.RD.quorum_pass !== true
       ) {
         item_result.status = "vote_failed";
-        await product.update({
-          chain_status: "pending",
-        });
+        await metadata.update({ chain_status: "pending" });
         result_map.push(item_result);
         continue;
       }
 
       const payload = {
-        timestamp: Date.now(),
+        timestamp: String(Date.now()),
         payload: {
-          current_id: product.id,
+          product_id: product_master.id,
+          metadata_id: metadata.id,
           type: "product_create",
           hash: product_hash,
-          version: "1.0.1",
-          Owner_id: product.author,
+          version: `${metadata.version}`,
+          Owner_id: product_master.author,
           status: "active",
-          detail: "none",
+          original_value: raw,
+          detail: `Version ${metadata.version} creation`,
         },
       };
 
@@ -142,25 +158,23 @@ const auto_pair_product = async (db, nodes) => {
 
       item_result.commit = commitResp;
 
-      if (
-        commitResp.RC === 200 &&
-        commitResp.RD &&
-        commitResp.RD.complate >=
-          Math.ceil((vote_results.RD.admin.online * 5) / 6)
-      ) {
-        await product.update({ chain_status: "active" });
-        console.log("vote_success: ", JSON.stringify(item_result, null, 2));
+      if (commitResp.RC === 200) {
+        await metadata.update({
+          chain_status: "active",
+          txt_hash: product_hash,
+        });
         item_result.status = "success";
       } else {
-        await product.update({ chain_status: "pending" });
-        console.log("vote_failed: ", JSON.stringify(item_result, null, 2));
-        item_result.status = " ";
+        await metadata.update({ chain_status: "pending" });
+        console.log("commit_failed: ", JSON.stringify(item_result, null, 2));
+        item_result.status = "commit_failed";
       }
       result_map.push(item_result);
     }
+
     return {
       ok: true,
-      msg: "Đã xử lý danh sách sản phẩm.",
+      msg: "Đã xử lý danh sách metadata sản phẩm.",
       results: result_map,
     };
   } catch (error) {
@@ -196,7 +210,7 @@ const auto_pair_company = async (db, nodes) => {
               [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
             },
           },
-          limit: 2,
+          limit: 15,
         }),
         db.Retailer.findAll({
           where: {
@@ -210,7 +224,7 @@ const auto_pair_company = async (db, nodes) => {
               [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
             },
           },
-          limit: 2,
+          limit: 15,
         }),
         db.Distributor.findAll({
           where: {
@@ -224,7 +238,7 @@ const auto_pair_company = async (db, nodes) => {
               [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
             },
           },
-          limit: 2,
+          limit: 15,
         }),
         db.Transporter.findAll({
           where: {
@@ -238,7 +252,7 @@ const auto_pair_company = async (db, nodes) => {
               [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "" }],
             },
           },
-          limit: 2,
+          limit: 15,
         }),
       ]);
 
@@ -265,7 +279,18 @@ const auto_pair_company = async (db, nodes) => {
         commit: null,
       };
 
-      const raw = `${company.id}|${company.company_name}|${company.license_number || "no_tax"}`;
+      const c_id = String(company.id || "").trim();
+      const c_name = String(company.company_name || "")
+        .normalize("NFC")
+        .trim();
+      const c_license = String(company.license_number || "no_license")
+        .normalize("NFC")
+        .trim();
+      const c_tax = String(company.tax_code || "no_tax")
+        .normalize("NFC")
+        .trim();
+
+      const raw = `${c_id}|${c_name}|${c_license}|${c_tax}`;
       const company_hash = crypto
         .createHash("sha256")
         .update(raw)
@@ -291,7 +316,7 @@ const auto_pair_company = async (db, nodes) => {
       }
 
       const payload = {
-        timestamp: Date.now(),
+        timestamp: String(Date.now()),
         payload: {
           current_id: company.id,
           type: "company_onboarding",
@@ -299,7 +324,7 @@ const auto_pair_company = async (db, nodes) => {
           hash: company_hash,
           version: "1.0.0",
           detail: "on chain company/store",
-          original_value: "",
+          original_value: raw,
           status: "active",
         },
       };
@@ -313,10 +338,11 @@ const auto_pair_company = async (db, nodes) => {
 
       item_result.commit = commitResp;
 
-      const required_nodes = Math.ceil((vote_results.RD.admin.online * 5) / 6);
-
-      if (commitResp.RC === 200 && commitResp.RD?.complate >= required_nodes) {
-        await company.update({ chain_status: "active" });
+      if (commitResp.RC === 200) {
+        await company.update({
+          chain_status: "active",
+          txt_hash: company_hash,
+        });
         item_result.status = "success";
         console.log(`[OK] Doanh nghiệp ${company.id} đã ON-CHAIN.`);
       } else {
@@ -659,49 +685,125 @@ const auto_pair_user = async (db, nodes) => {
     });
 
     if (!settings || settings.enabled !== true) {
-      return {
-        ok: false,
-        msg: "Auto approve user is disabled.",
-      };
+      return { ok: false, msg: "Tự động kích hoạt user đang bị tắt (ATOAPU)." };
     }
+
     const user_list = await db.Actor_model.findAll({
       where: {
         role_active: "active",
         status: "pending",
         public_key: {
-          [Op.ne]: "null",
+          [Op.and]: [{ [Op.ne]: null }, { [Op.ne]: "null" }, { [Op.ne]: "" }],
         },
       },
-      limit: 5,
+      limit: 15,
     });
 
     if (!user_list || user_list.length === 0) {
-      return {
-        ok: false,
-        msg: "Không có người dùng pending.",
-      };
+      return { ok: false, msg: "Không có người dùng pending hợp lệ." };
     }
 
-    const result_map = {};
+    const versionSetting = await db.System_Settings.findOne({
+      where: { key: "APPVS" },
+    });
+    const appVersion = versionSetting ? versionSetting.description : "1.0.0";
+
+    const node_map = await db.peer_map.findAll({
+      where: { status: "active", health: "ok" },
+    });
+    const quorum = Math.ceil((2 * node_map.length) / 3);
+
+    const result_map = [];
 
     for (const user of user_list) {
-      await user.update({ status: "pairing" });
+      const TRACE = `[PROCESS_USER_BLOCK][${user.id}]`;
+      const item_result = { user_id: user.id, status: "failed" };
 
-      const result = await pair_validate.process_user_block(
-        db,
-        nodes,
-        pendingRequests,
-      )(user);
+      try {
+        console.log(`${TRACE} Đang xử lý On-chain cho User...`);
 
-      if (result.ok) {
-        await user.update({ status: "active" });
-      } else {
+        await user.update({ status: "pairing" });
+
+        const u_id = String(user.id || "").trim();
+        const u_email = String(user.email || "")
+          .normalize("NFC")
+          .trim();
+        const u_pk = String(user.public_key || "").trim();
+        const u_role = String(user.role || "").trim();
+
+        const raw = `${u_id}|${u_email}|${u_pk}|${u_role}`;
+        const user_hash = crypto.createHash("sha256").update(raw).digest("hex");
+
+        const payload = {
+          timestamp: String(Date.now()),
+          user: {
+            id: user.id,
+            hash: user_hash,
+            version: appVersion,
+            type: "create_user",
+            original_value: raw,
+          },
+        };
+
+        const vote_results = await pair_validate.get_vote(
+          db,
+          raw,
+          user.id,
+          "user_create",
+          "active",
+          nodes,
+          "new",
+        );
+
+        if (
+          vote_results.RC !== 200 ||
+          (vote_results.RD && vote_results.RD.vote_true < quorum)
+        ) {
+          console.warn(
+            `${TRACE} ABORT: Không đủ phiếu Vote đồng thuận (Quorum: ${quorum}).`,
+          );
+          await user.update({ status: "pending" });
+          item_result.msg = "Lỗi đồng thuận Vote.";
+          result_map.push(item_result);
+          continue;
+        }
+
+        const commitResp = await pair_validate.pair_request(
+          db,
+          payload,
+          nodes,
+          "pair_user",
+        );
+
+        if (commitResp.RC !== 200) {
+          console.warn(`${TRACE} ABORT: Các Node từ chối Commit Block.`);
+          await user.update({ status: "pending" });
+          item_result.msg = "Không đủ số node commit block.";
+          result_map.push(item_result);
+          continue;
+        }
+
+        await user.update({ status: "active", txt_hash: user_hash });
+        item_result.status = "success";
+        item_result.msg = "User đã được xác thực ON-CHAIN thành công.";
+        console.log(`${TRACE} XONG! Đã Commit Block.`);
+
+        result_map.push(item_result);
+      } catch (innerError) {
+        console.error(`${TRACE} LỖI CỤC BỘ TRONG VÒNG LẶP:`, innerError);
         await user.update({ status: "pending" });
+        item_result.msg = innerError.message;
+        result_map.push(item_result);
       }
     }
-    return console.log("[USER PAIR]: ", result_map);
+
+    return {
+      ok: true,
+      msg: `Đã xử lý xong batch ${user_list.length} users.`,
+      results: result_map,
+    };
   } catch (error) {
-    console.error("[auto_pair_product ERROR]", error);
+    console.error("[auto_pair_user ERROR] LỖI TOÀN HỆ THỐNG:", error);
     return {
       ok: false,
       msg: "Server nội bộ lỗi.",
@@ -785,7 +887,6 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
         );
 
         const result = await waitResponse;
-        console.log(`[${syncId}] RESPONSE from ${nodeId}:`, result);
 
         if (result?.timeout) {
           console.warn(`[${syncId}] TIMEOUT from ${nodeId}`);
@@ -906,10 +1007,6 @@ const getBlockFormHeight = async (db, nodes, from_height, limit) => {
       }
 
       if (!winner) break;
-
-      console.log(
-        `[${syncId}] SELECT height=${height} hash=${winner.block.Hash} votes=${winner.count}`,
-      );
 
       canonicalBlocks.push({
         ...winner.block,
@@ -1173,12 +1270,12 @@ const MaintenanceNode = (db, nodes) => async (req, res) => {
 
 const Drop_block = async (db, nodes) => {
   try {
-    const drop_list = await db.Product.findAll({
+    const drop_list = await db.Product_Metadata.findAll({
       where: {
         chain_status: "wait-droped",
       },
-      limit: 5,
-      attributes: ["id"],
+      limit: 15,
+      attributes: ["id"], // Lấy Metadata ID (Lá)
     });
 
     if (drop_list.length < 1) {
@@ -1223,10 +1320,16 @@ const Drop_block = async (db, nodes) => {
     const approvedIds = Object.entries(products)
       .filter(([_, v]) => v.approve === true)
       .map(([id]) => id);
+
     let admin_online = 0;
     let client_online = 0;
+
+    // 2. FIX BUG ẨN: Bắt buộc phải khởi tạo voteRoundId trước khi dùng
+    const voteRoundId = uuidv4();
+
     const waitVoteRound = new Promise((resolve) => {
       const timeoutId = setTimeout(() => {
+        // Lưu ý: Đảm bảo biến 'voteRounds' (Map) đã được định nghĩa ở global
         const round = voteRounds.get(voteRoundId);
         if (!round) return;
 
@@ -1259,7 +1362,8 @@ const Drop_block = async (db, nodes) => {
       for (const [nodeId, ws] of onlineEntries) {
         const nodeData = await db.peer_map.findByPk(nodeId);
         if (!nodeData) {
-          console.warn(TAG, "NODE DATA NOT FOUND", nodeId);
+          // Lưu ý: Đảm bảo biến 'TAG' đã được định nghĩa
+          console.warn("DROP_BLOCK", "NODE DATA NOT FOUND", nodeId);
           continue;
         }
 
@@ -1274,16 +1378,19 @@ const Drop_block = async (db, nodes) => {
             requestId: uuidv4(),
             voteRoundId,
             payload: {
-              approvedIds,
+              approvedIds, // Node C# sẽ nhận mảng Metadata_ID này để Drop
             },
             serverTime: Date.now(),
           }),
         );
       }
-      await db.Product.update(
+
+      // 3. FIX KIẾN TRÚC: Update trạng thái 'down' trên bảng Product_Metadata
+      await db.Product_Metadata.update(
         { chain_status: "down" },
         { where: { id: approvedIds } },
       );
+
       const result = await waitVoteRound;
       console.log("drop_res: ", result);
     }
@@ -1321,7 +1428,7 @@ const auto_pair_contract = async (db, nodes) => {
         status: "official",
         onchain_status: "pending",
       },
-      limit: 2,
+      limit: 15,
       order: [["official_at", "ASC"]],
     });
 
@@ -1341,7 +1448,13 @@ const auto_pair_contract = async (db, nodes) => {
         commit: null,
       };
 
-      const raw = `${contract.id}|${contract.sender_id}|${contract.receiver_id}|${contract.nda_hash}|`;
+      const raw = [
+        String(contract.id || "").trim(),
+        String(contract.sender_id || "").trim(),
+        String(contract.receiver_id || "").trim(),
+        String(contract.nda_hash || "").trim(),
+      ].join("|");
+
       const contract_hash = crypto
         .createHash("sha256")
         .update(raw)
@@ -1367,13 +1480,14 @@ const auto_pair_contract = async (db, nodes) => {
       }
 
       const payload = {
-        timestamp: Date.now(),
+        timestamp: String(Date.now()),
         payload: {
           current_id: contract.id,
           type: "contract_official",
           hash: contract_hash,
-          version: "1.0.1",
+          version: "1",
           Owner_id: `${contract.sender_id}|${contract.receiver_id}`,
+          original_value: raw,
           detail: `Collaboration: ${contract.collaboration_type}`,
           status: "official",
         },
@@ -1388,10 +1502,11 @@ const auto_pair_contract = async (db, nodes) => {
 
       item_result.commit = commitResp;
 
-      const required_nodes = Math.ceil((vote_results.RD.admin.online * 5) / 6);
-
-      if (commitResp.RC === 200 && commitResp.RD?.complate >= required_nodes) {
-        await contract.update({ onchain_status: "on-chain" });
+      if (commitResp.RC === 200) {
+        await contract.update({
+          onchain_status: "on-chain",
+          txt_hash: contract_hash,
+        });
         item_result.status = "success";
         console.log(
           `[BLOCKCHAIN] Hợp đồng ${contract.id} đã On-chain thành công.`,
@@ -1431,9 +1546,9 @@ const Auto_pair_batched = async (db, nodes) => {
 
     const pendingBatches = await db.product_batch.findAll({
       where: {
-        status: "pending",
+        Chain_status: "pending",
       },
-      limit: 5,
+      limit: 15,
       order: [["updatedAt", "ASC"]],
     });
 
@@ -1444,16 +1559,24 @@ const Auto_pair_batched = async (db, nodes) => {
     const result_map = [];
 
     for (const batch of pendingBatches) {
-      await batch.update({ status: "pairing" });
+      await batch.update({ Chain_status: "paring" });
 
       const item_result = {
         batch_id: batch.id,
-        status: "pairing",
+        Chain_status: "paring",
         vote: null,
         commit: null,
       };
 
-      const raw = `${batch.id}|${batch.product_id}|${batch.QC_Pass}|${batch.QC_Failed}|${batch.qc_manager_id}`;
+      const raw = [
+        String(batch.id || "").trim(),
+        String(batch.product_id || "").trim(),
+        String(batch.QC_Pass ?? "0").trim(),
+        String(batch.QC_Failed ?? "0").trim(),
+        String(batch.qc_manager_id || "")
+          .normalize("NFC")
+          .trim(),
+      ].join("|");
       const batch_hash = crypto.createHash("sha256").update(raw).digest("hex");
       const vote_results = await pair_validate.get_vote(
         db,
@@ -1469,19 +1592,20 @@ const Auto_pair_batched = async (db, nodes) => {
 
       if (vote_results.RC !== 200 || !vote_results.RD?.quorum_pass) {
         item_result.status = "vote_failed";
-        await batch.update({ status: "pending" });
+        await batch.update({ Chain_status: "pending" });
         result_map.push(item_result);
         continue;
       }
 
       const payload = {
-        timestamp: Date.now(),
+        timestamp: String(Date.now()),
         payload: {
           current_id: batch.id,
           type: "Batch_complate",
           hash: batch_hash,
-          version: "1.0.2",
+          version: "1",
           Owner_id: batch.author,
+          original_value: raw,
           detail: `Batch: ${batch.batch_name} | Pass: ${batch.QC_Pass} | Fail: ${batch.QC_Failed}`,
           status: "active",
         },
@@ -1493,18 +1617,14 @@ const Auto_pair_batched = async (db, nodes) => {
         nodes,
         "pair_other",
       );
-
       item_result.commit = commitResp;
 
-      const required_nodes = Math.ceil((vote_results.RD.admin.online * 5) / 6);
-
-      if (commitResp.RC === 200 && commitResp.RD?.complate >= required_nodes) {
-        await batch.update({ status: "completed" });
-        item_result.status = "success";
-        console.log(`[BLOCKCHAIN] Lô hàng ${batch.id} đã On-chain thành công.`);
+      if (commitResp.RC === 200) {
+        await batch.update({ Chain_status: "active", txt_hash: batch_hash });
+        item_result.Chain_status = "active";
       } else {
-        await batch.update({ status: "pending" });
-        item_result.status = "commit_failed";
+        await batch.update({ Chain_status: "pending" });
+        item_result.Chain_status = "pending";
       }
 
       result_map.push(item_result);
@@ -1561,16 +1681,31 @@ const Auto_pair_shipingorder = async (db, nodes) => {
             receiver_confirm: "accepted",
             transporter_confirm: "accepted",
           },
+          {
+            onchain_status: "delivery_signed", 
+            status: "completed",
+            payment_status: "complated",
+            shipping_payment_status: "complated",
+            sender_confirm: "confirmed",
+            receiver_confirm: "accepted",
+            transporter_confirm: "accepted",
+          },
         ],
       },
       include: [{ model: db.product_batch, as: "batches", attributes: ["id"] }],
-      limit: 10,
+      limit: 15,
       order: [["updatedAt", "ASC"]],
     });
 
     if (pendingOrders.length === 0) {
       return { ok: true, msg: "Không có gì để lên chain." };
     }
+
+    const orderIdsToLock = pendingOrders.map((o) => o.id);
+    await db.shipping_order.update(
+      { onchain_status: "pairing" },
+      { where: { id: { [db.Sequelize.Op.in]: orderIdsToLock } } },
+    );
     pendingOrders.forEach((o) => processingIds.push(o.id));
 
     for (const order of pendingOrders) {
@@ -1598,16 +1733,44 @@ const Auto_pair_shipingorder = async (db, nodes) => {
           detailMsg = `Hàng đã giao: ${order.id}`;
           break;
 
+        // 🚀 LỖI 1 ĐÃ SỬA: Thay "Shipping_Delivered" bằng "delivery_signed" cho đúng dữ liệu thô từ DB
+        case order.status === "completed" &&
+          order.payment_status === "complated" &&
+          order.shipping_payment_status === "complated" &&
+          oldOnchainStatus === "delivery_signed":
+          type = "complete_shipping";
+          targetStatus = "completed";
+          detailMsg = `Vận đơn hoàn thành: ${order.id}`;
+          break;
+
         default:
-          console.log(`[TRACECHAIN] Bỏ qua ${order.id} - Không khớp case.`);
+          console.log(
+            `[TRACECHAIN] Bỏ qua ${order.id} - Không khớp case. Cập nhật hoàn trả trạng thái gốc.`,
+          );
+          // 🚀 LỖI 2 ĐÃ SỬA: Hoàn trả lại trạng thái cũ ngay lập tức nếu rơi vào default, không để bị kẹt chữ "pairing" vĩnh viễn
+          await db.shipping_order.update(
+            { onchain_status: oldOnchainStatus },
+            { where: { id: order.id } },
+          );
           continue;
       }
 
       const batchIds = order.batches?.map((b) => b.id).join(",") || "no_batch";
-      const raw = `${order.id}|${order.status}|${oldOnchainStatus}|${batchIds}|${order.total_ship_price}|${order.total_quantity}|${order.product_total_price}|${order.sender_id}|${order.customer_id}|${order.shipping_partner}`;
+      const raw = [
+        String(order.id || "").trim(),
+        String(order.status || "").trim(),
+        String(oldOnchainStatus || "").trim(),
+        String(batchIds || "").trim(),
+        String(order.total_ship_price ?? "0").trim(),
+        String(order.total_quantity ?? "0").trim(),
+        String(order.product_total_price ?? "0").trim(),
+        String(order.sender_id || "").trim(),
+        String(order.customer_id || "").trim(),
+        String(order.shipping_partner || "")
+          .normalize("NFC")
+          .trim(),
+      ].join("|");
       const order_hash = crypto.createHash("sha256").update(raw).digest("hex");
-
-      await order.update({ onchain_status: "pairing" });
 
       try {
         const vote_results = await pair_validate.get_vote(
@@ -1620,15 +1783,19 @@ const Auto_pair_shipingorder = async (db, nodes) => {
           "new",
         );
 
+        const Owner_id = `${order?.sender_id}|${order?.customer_id}|${order?.shipping_partner}`;
         if (vote_results.RC === 200 && vote_results.RD?.quorum_pass) {
           const payload = {
-            timestamp: Date.now(),
+            timestamp: String(Date.now()),
             payload: {
               current_id: order.id,
               type: type,
               hash: order_hash,
+              Owner_id: Owner_id,
               detail: detailMsg,
+              original_value: raw,
               status: "active",
+              version: "1",
             },
           };
 
@@ -1638,15 +1805,17 @@ const Auto_pair_shipingorder = async (db, nodes) => {
             nodes,
             "pair_other",
           );
-
-          const online_admins = vote_results.RD.admin.online || 1;
-          const required_nodes = Math.ceil((online_admins * 5) / 6);
-
-          if (
-            commitResp.RC === 200 &&
-            commitResp.RD?.complate >= required_nodes
-          ) {
-            await order.update({ onchain_status: targetStatus });
+          if (commitResp.RC === 200) {
+            const updateData = { onchain_status: targetStatus };
+            if (type === "Shipping_Agreement")
+              updateData.hash_agreement = order_hash;
+            if (type === "Shipping_In_Transit")
+              updateData.hash_transit = order_hash;
+            if (type === "Shipping_Delivered")
+              updateData.hash_delivered = order_hash;
+            if (type === "complete_shipping")
+              updateData.hash_completed = order_hash;
+            await order.update(updateData);
             console.log(`[TRACECHAIN] ${order.id} - ON-CHAIN SUCCESS.`);
           } else {
             await order.update({ onchain_status: oldOnchainStatus });
@@ -1659,7 +1828,6 @@ const Auto_pair_shipingorder = async (db, nodes) => {
           `[TRACECHAIN] Lỗi xử lý đơn ${order.id}:`,
           innerError.message,
         );
-
         await order.update({ onchain_status: oldOnchainStatus });
       }
     }
@@ -1703,6 +1871,17 @@ const Auto_pair_shipingorder = async (db, nodes) => {
             },
           },
         );
+        // 🚀 LỖI 3 ĐÃ SỬA: Thêm lệnh giải cứu cho đơn hàng completed nếu hệ thống bị crash đột ngột
+        await db.shipping_order.update(
+          { onchain_status: "delivery_signed" },
+          {
+            where: {
+              id: processingIds,
+              onchain_status: "pairing",
+              status: "completed",
+            },
+          },
+        );
       } catch (rescueErr) {
         console.error(
           ">>> [FATAL] Cứu hộ thất bại nặng nề:",
@@ -1719,8 +1898,138 @@ const Auto_pair_shipingorder = async (db, nodes) => {
   }
 };
 
+const Auto_pair_payment = async (db, nodes) => {
+  try {
+    const settings = await db.System_Settings.findOne({
+      where: { key: "ATOAPS" },
+    });
+
+    if (!settings || settings.enabled !== true) {
+      return { ok: false, msg: "Tự động kích hoạt duyệt payment đang bị tắt." };
+    }
+
+    const pendingPayments = await db.payment_sessions.findAll({
+      where: {
+        chain_status: "pending",
+        status: "paid",
+      },
+      limit: 15,
+      order: [["updatedAt", "ASC"]],
+    });
+
+    if (pendingPayments.length === 0) {
+      return { ok: true, msg: "Không có giao dịch nào đủ điều kiện On-chain." };
+    }
+
+    const result_map = [];
+
+    for (const payment of pendingPayments) {
+      await payment.update({ chain_status: "paring" });
+
+      const item_result = {
+        payment_id: payment.id,
+        chain_status: "paring",
+        vote: null,
+        commit: null,
+      };
+
+      const rawData = [
+        String(payment.id || "").trim(),
+        String(payment.payment_code || "").trim(),
+        String(payment.payer_id || "").trim(),
+        String(payment.receiver_id || "").trim(),
+        String(payment.amount_actual ?? "0").trim(),
+        String(payment.sepay_transaction_id || "").trim(),
+        payment.updatedAt ? String(new Date(payment.updatedAt).getTime()) : "0",
+      ].join("|");
+
+      const payment_hash = crypto
+        .createHash("sha256")
+        .update(rawData)
+        .digest("hex");
+
+      const vote_results = await pair_validate.get_vote(
+        db,
+        payment_hash,
+        payment.id,
+        "Payment_verification",
+        "active",
+        nodes,
+        "new",
+      );
+
+      item_result.vote = vote_results;
+
+      if (vote_results.RC !== 200 || !vote_results.RD?.quorum_pass) {
+        item_result.status = "vote_failed";
+        await payment.update({ chain_status: "pending" });
+        result_map.push(item_result);
+        continue;
+      }
+
+      const payload = {
+        timestamp: Date.now(),
+        payload: {
+          current_id: payment.id,
+          type: "Payment_onchain",
+          hash: payment_hash,
+          version: "1",
+          original_value: rawData,
+          Owner_id: payment.payer_id,
+          detail: `{
+            payment_code: ${payment.payment_code},
+            amount: ${payment.amount_actual},
+            payer: ${payment.payer_id},
+            receiver: ${payment.receiver_id},
+            sepay_id: ${payment.sepay_transaction_id},
+            order_id: ${payment.order_id},
+            ship_id: ${payment.ship_id},
+          }`,
+          status: "active",
+        },
+      };
+
+      const commitResp = await pair_validate.pair_request(
+        db,
+        payload,
+        nodes,
+        "pair_other",
+      );
+
+      item_result.commit = commitResp;
+
+      if (commitResp.RC === 200) {
+        await payment.update({
+          chain_status: "active",
+          txt_hash: payment_hash,
+        });
+        item_result.status = "success";
+      } else {
+        await payment.update({ chain_status: "pending" });
+        item_result.status = "commit_failed";
+      }
+
+      result_map.push(item_result);
+    }
+
+    return {
+      ok: true,
+      msg: `Đã xử lý On-chain cho ${pendingPayments.length} giao dịch thanh toán.`,
+      results: result_map,
+    };
+  } catch (error) {
+    console.error("[Auto_pair_payment ERROR]", error);
+    return {
+      ok: false,
+      msg: "Lỗi hệ thống khi On-chain payment.",
+      error: error.message,
+    };
+  }
+};
+
 export default {
   waitVoteRound,
+  Auto_pair_payment,
   Auto_pair_shipingorder,
   Auto_pair_batched,
   auto_pair_contract,
